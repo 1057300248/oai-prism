@@ -1,0 +1,257 @@
+package facade
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"io"
+	"net/http"
+	"strings"
+
+	"github.com/oai-prism/oaiprism/internal/prism"
+	"github.com/oai-prism/oaiprism/internal/sse"
+)
+
+// handleAnthropicMessages 实现 POST /v1/messages（Anthropic 协议）。
+//
+// 支持这个端点的实际价值：市面上大量客户端（各种 CLI、IDE 插件）
+// 只实现了 Anthropic 协议，或者用 Anthropic 协议效果更好。
+// 在门面层做一次协议翻译的成本很低，但可用面扩大一倍。
+func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request) {
+	body, err := h.readBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	req, rawFields, err := decodeJSON[AnthropicRequest](body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+	if len(req.Messages) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "messages 不能为空")
+		return
+	}
+
+	model, effort := h.resolveModel(req.Model, "")
+	accountID, projectID := applyHeaderOverrides(r, &model, &effort)
+
+	// Anthropic 把 system 放在顶层字段；上游的 input 数组本身接受
+	// system 角色，所以直接搬到数组里、保持 system 不变 ——
+	// 不要折成 user 消息（那会把指令降级成用户发言）。
+	input := translateAnthropicMessages(req.Messages, "")
+	if sys := req.System.Text(); sys != "" {
+		input = append([]prism.InputItem{prism.NewSystemItem(sys)}, input...)
+	} else if h.cfg.Facade.DefaultSystemPrompt != "" {
+		input = append([]prism.InputItem{prism.NewSystemItem(h.cfg.Facade.DefaultSystemPrompt)}, input...)
+	}
+
+	runReq := &RunRequest{
+		Model:     model,
+		Effort:    effort,
+		UserID:    anthropicUserID(rawFields),
+		Input:     input,
+		Metadata:  mergeMetadata(clientMetadata(rawFields), metadataWith("tools", anthropicToolsMetadata(req.Tools))),
+		StickyKey: anthropicConversationKey(r, rawFields, req.Messages),
+		AccountID: accountID,
+		ProjectID: projectID,
+		API:       "messages",
+	}
+	runReq.PreviousResponseID = previousResponseIDFrom(r, rawFields)
+	runReq.ConversationID = conversationIDFrom(r, rawFields)
+	runReq.Extra = passthroughFields(rawFields, anthropicKnownFields)
+
+	id := newID("msg_")
+
+	if req.Stream {
+		h.streamAnthropic(w, r, runReq, id, req.Model)
+		return
+	}
+	h.syncAnthropic(w, r, runReq, id, req.Model)
+}
+
+var anthropicKnownFields = map[string]struct{}{
+	"model": {}, "messages": {}, "max_tokens": {}, "system": {}, "stream": {},
+	"tools": {}, "tool_choice": {}, "temperature": {}, "top_p": {}, "top_k": {},
+	"stop_sequences": {}, "metadata": {},
+	// 会话延续与前一轮响应 ID：已由 conversationIDFrom / previousResponseIDFrom 消费，不作为未知字段透传。
+	"conversation_id": {}, "conversationId": {},
+	"previous_response_id": {}, "previousResponseId": {},
+}
+
+// anthropicUserID 取 Anthropic 侧的调用方身份：metadata.user_id。
+//
+// 它有两个用处，别只顾一个：
+//  1. 会话粘性（见 anthropicConversationKey）
+//  2. 透传给上游 metadata（滥用追踪 / 配额归属）
+//
+// Anthropic 协议本身没有顶层 user 字段，这是官方约定的位置。
+func anthropicUserID(body map[string]json.RawMessage) string {
+	raw, ok := body["metadata"]
+	if !ok {
+		return ""
+	}
+	var md struct {
+		UserID string `json:"user_id"`
+	}
+	if err := json.Unmarshal(raw, &md); err != nil {
+		return ""
+	}
+	return md.UserID
+}
+
+func anthropicConversationKey(r *http.Request, body map[string]json.RawMessage, msgs []AnthropicMessage) string {
+	if v := strings.TrimSpace(r.Header.Get(HeaderSession)); v != "" {
+		return "h:" + v
+	}
+	// Anthropic 没有 user 字段，用 metadata.user_id 兜底。
+	if uid := anthropicUserID(body); uid != "" {
+		return "u:" + uid
+	}
+	conv := make([]ChatMessage, 0, len(msgs))
+	for _, m := range msgs {
+		conv = append(conv, ChatMessage{Role: m.Role, Content: m.Content})
+	}
+	return conversationKey(r, nil, conv)
+}
+
+func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id, publicModel string) {
+	// 流式头必须早于首帧，只能回显客户端带回来的会话 ID（见 streamChat 注释）。
+	setConversationHeader(w, runReq.ConversationID)
+
+	sw, err := sse.New(w)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	defer sw.Close()
+
+	buf := make([]byte, 0, 2048)
+
+	// message_start 必须先发，且此时还不知道 input_tokens，
+	// 用一个占位值，最后在 message_delta 里给准确的 output_tokens。
+	buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{
+		Type: "message_start", MessageID: id, Model: publicModel,
+	})
+	if err := sw.WriteRaw(buf); err != nil {
+		return
+	}
+	buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "content_block_start"})
+	if err := sw.WriteRaw(buf); err != nil {
+		return
+	}
+
+	emit := func(d Delta) error {
+		if d.Text == "" {
+			return nil
+		}
+		buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "content_block_delta", Text: d.Text})
+		return sw.WriteRaw(buf)
+	}
+
+	res, runErr := h.runner.Run(r.Context(), runReq, emit)
+
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "error", Text: runErr.Error()})
+		_ = sw.WriteRaw(buf)
+		return
+	}
+
+	buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "content_block_stop"})
+	_ = sw.WriteRaw(buf)
+
+	var usage *prism.Usage
+	if res != nil {
+		usage = res.Usage
+	}
+	buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{
+		Type: "message_delta", StopReason: "end_turn", Usage: usage,
+	})
+	_ = sw.WriteRaw(buf)
+
+	buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "message_stop"})
+	_ = sw.WriteRaw(buf)
+}
+
+func (h *Handler) syncAnthropic(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id, publicModel string) {
+	res, err := h.runner.Run(r.Context(), runReq, nil)
+	if err != nil {
+		status, typ, msg := mapError(err)
+		writeError(w, status, typ, msg)
+		return
+	}
+
+	text := ""
+	if res != nil {
+		text = res.Text
+		setConversationHeader(w, res.ConversationID)
+	}
+	resp := AnthropicResponse{
+		ID:         id,
+		Type:       "message",
+		Role:       "assistant",
+		Model:      publicModel,
+		Content:    []AnthropicContent{{Type: "text", Text: text}},
+		StopReason: "end_turn",
+	}
+	if res != nil && res.Usage != nil {
+		resp.Usage = AnthropicUsage{
+			InputTokens:  res.Usage.InputTokens,
+			OutputTokens: res.Usage.OutputTokens,
+		}
+	} else {
+		resp.Usage = AnthropicUsage{OutputTokens: estimateTokens(text)}
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// ---------------------------- 别名端点 ----------------------------
+
+// handleCompletions 把老的 /v1/completions 映射到 chat。
+//
+// 很多老工具链仍然在调它，做一次转换比让用户改代码更省事。
+func (h *Handler) handleCompletions(w http.ResponseWriter, r *http.Request) {
+	body, err := h.readBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+	var legacy struct {
+		Model  string `json:"model"`
+		Prompt any    `json:"prompt"`
+		Stream bool   `json:"stream"`
+	}
+	if err := json.Unmarshal(body, &legacy); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON")
+		return
+	}
+
+	prompt := ""
+	switch p := legacy.Prompt.(type) {
+	case string:
+		prompt = p
+	case []any:
+		for _, e := range p {
+			if s, ok := e.(string); ok {
+				prompt += s
+			}
+		}
+	}
+
+	// 转成 chat 形态后复用同一个 handler：只维护一条推理路径，
+	// 避免"两套入口两套 bug"。
+	chatBody, err := json.Marshal(ChatRequest{
+		Model:    legacy.Model,
+		Messages: []ChatMessage{{Role: "user", Content: stringContent(prompt)}},
+		Stream:   legacy.Stream,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", "转换请求体失败")
+		return
+	}
+	r.Body = io.NopCloser(bytes.NewReader(chatBody))
+	r.ContentLength = int64(len(chatBody))
+	h.handleChatCompletions(w, r)
+}

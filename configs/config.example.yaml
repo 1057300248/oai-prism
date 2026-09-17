@@ -1,0 +1,395 @@
+# OAIprism 配置示例
+#
+# 用法：cp configs/config.example.yaml configs/config.yaml 后按需修改。
+# 所有相对路径都以本文件所在目录为基准解析。
+
+server:
+  host: 0.0.0.0
+  port: 8787
+
+  # 流式场景下 write_timeout 必须是 0，否则长回答会被硬切断。
+  read_header_timeout: 10s
+  read_timeout: 0s
+  write_timeout: 0s
+  idle_timeout: 120s
+
+  max_header_bytes: 1048576
+  max_body_bytes: 67108864 # 64MB
+
+  # TCP 层：接收缓冲放大到 64KB，减少高吞吐下的 syscall 次数。
+  tcp_no_delay: true
+  read_buffer_size: 65536
+
+  # 跨域来源。留空=不启用 CORS（纯服务端调用无需开启）。
+  # 浏览器直连本代理时才需要填，例如 http://localhost:3000
+  cors_origin: ""
+
+  tls:
+    enabled: false
+    cert_file: ""
+    key_file: ""
+
+# ---------------------------------------------------------------------------
+# 上游（prism.openai.com）
+# ---------------------------------------------------------------------------
+upstream:
+  base_url: https://prism.openai.com
+
+  # 单个请求整体超时。0 = 不设上限，由 context 精确控制。
+  # 强烈建议保持 0：流式与长轮询都需要"多久都等"。
+  timeout: 0s
+
+  dial_timeout: 10s
+  keep_alive: 30s
+  tls_handshake_timeout: 10s
+  response_header_timeout: 120s
+  expect_continue_timeout: 1s
+
+  # 连接池。这三项是吞吐的第一瓶颈，别用默认值。
+  max_idle_conns: 512
+  max_idle_conns_per_host: 256
+  max_conns_per_host: 0 # 0 = 不限
+  idle_conn_timeout: 90s
+
+  force_http2: true
+
+  # 必须为 true：让代理原样透传字节，
+  # 否则 Go 会偷偷加 Accept-Encoding 并解压，导致 Content-Length 对不上。
+  disable_compression: true
+
+  read_buffer_size: 32768
+  write_buffer_size: 32768
+
+  insecure_skip_verify: false
+
+  # 出站代理（可选）。账号级代理见 creds.accounts[].proxy。
+  # http_proxy: http://127.0.0.1:7890
+
+  # 伪装成浏览器：这几个头缺失很容易被上游风控识别为脚本。
+  user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+  origin: "https://prism.openai.com"
+  referer: "https://prism.openai.com/"
+
+  headers: {}
+  # headers:
+  #   oai-language: zh-CN
+
+  # 重试：只对网络错误与 5xx/429 生效，4xx 不重试（重试只是浪费配额）。
+  max_retries: 3
+  retry_backoff: 200ms
+  retry_max_delay: 5s
+
+  breaker_threshold: 12
+  breaker_cooldown: 30s
+
+# ---------------------------------------------------------------------------
+# 凭据：这是你唯一必须提供的东西
+# ---------------------------------------------------------------------------
+creds:
+  # static      - 凭据写在下面的 accounts 里
+  # file        - 凭据放在独立 JSON 文件，改动后自动热加载（推荐）
+  # passthrough - 由调用方每个请求自带
+  # hybrid      - 静态 + 文件同时用
+  mode: file
+  file: secrets/accounts.json
+  reload_interval: 5s
+
+  # 凭据自愈。开启后代理会在 token 快过期时自动续期，
+  # 让你不用每隔几小时手工换一次 Cookie。
+  auto_refresh: true
+  refresh_skew: 5m
+  refresh_interval: 10m
+
+  # 用 session cookie 换 accessToken 的内部端点。
+  session_path: /api/auth/session
+
+  # 有 refresh_token 时走 OAuth 续期（最稳，可无限续）。
+  oauth_token_url: https://auth.openai.com/oauth/token
+  oauth_client_id: app_EMoamEEZ73f0CkXaXp7hrann
+  oauth_scope: openid profile email offline_access
+
+  persist_refresh: false
+
+  # 直接写在配置里的账号（mode 为 static/hybrid 时生效）。
+  # 更推荐用 `oaiprism import` 命令写入 secrets/accounts.json。
+  accounts: []
+  # accounts:
+  #   - id: main
+  #     name: 主账号
+  #     cookies: "__Secure-next-auth.session-token=eyJ..."
+  #     max_concurrency: 2
+  #   - id: backup
+  #     name: 备用账号
+  #     access_token: "eyJhbGciOi..."
+  #     proxy: http://127.0.0.1:7891
+
+# ---------------------------------------------------------------------------
+# 账号池调度
+# ---------------------------------------------------------------------------
+pool:
+  # round_robin | least_inflight | random | sticky_hash | weighted
+  # least_inflight 是代理场景的默认最优解：把慢请求摊开。
+  strategy: least_inflight
+
+  # 会话粘性。Prism 的项目/会话是账号私有的，
+  # 同一对话换号会直接 404 —— 所以粘性是正确性要求而不是优化。
+  sticky_ttl: 30m
+
+  # 账号命中 401/429 后的冷却，随失败次数指数增长。
+  cooldown: 60s
+  cooldown_backoff: 2
+  max_cooldown: 30m
+
+  # 全池冷却时最多等多久，超过就直接报错。
+  # 一个 HTTP 请求挂几分钟等账号解冻是不可接受的：客户端早就超时了，
+  # 调用方还拿不到任何有用信息。凭据失效的场景会直接快速失败，不走这里。
+  max_wait: 10s
+
+  health_check: true
+  health_check_path: /api/auth/session
+  health_check_interval: 5m
+  health_check_timeout: 15s
+
+# ---------------------------------------------------------------------------
+# OpenAI / Anthropic 兼容门面
+# ---------------------------------------------------------------------------
+facade:
+  enabled: true
+
+  # 调用方鉴权。留空表示不校验（仅限本机或内网！）
+  # 也可以用环境变量 OAI_PRISM_API_KEYS 传，逗号分隔。
+  api_keys: []
+  # api_keys:
+  #   - sk-oaiprism-your-secret
+
+  default_model: gpt-6-astra
+
+  # 对外模型名 -> 上游真名 + 推理强度。
+  # label 是 /v1/models 里的展示名（可选，不填则不带 name 字段）。
+  models:
+    gpt-6-astra:
+      model: gpt-6-astra
+      reasoning_effort: medium
+      label: GPT-6 Astra
+    gpt-6-astra-high:
+      model: gpt-6-astra
+      reasoning_effort: high
+      label: GPT-6 Astra（高推理）
+    gpt-6-astra-low:
+      model: gpt-6-astra
+      reasoning_effort: low
+      label: GPT-6 Astra（低推理）
+    gpt-6:
+      model: gpt-6-astra
+      reasoning_effort: medium
+      label: GPT-6
+    astra:
+      model: gpt-6-astra
+      reasoning_effort: medium
+      label: Astra
+    gpt-5.6-sol:
+      model: gpt-5.6-sol
+      reasoning_effort: medium
+      label: GPT-5.6 Sol
+    gpt-5:
+      model: gpt-5.6-sol
+      reasoning_effort: medium
+      label: GPT-5
+    gpt-5-high:
+      model: gpt-5.6-sol
+      reasoning_effort: high
+      label: GPT-5（高推理）
+    gpt-5-xhigh:
+      model: gpt-5.6-sol
+      reasoning_effort: xhigh
+      label: GPT-5（极高推理）
+
+  # -------------------------------------------------------------------------
+  # 上游协议字段名映射
+  #
+  # 下面的值**已经用真实流量校准过**，不是猜的。校准依据：
+  #   1. 对 /api/llm/response_with_tools_start 发畸形请求，上游回
+  #      {"status":"error","message":"input must be an array"}；
+  #   2. 对 status 接口发空体回 "request_id is required"，
+  #      带上 request_id 后回 "turn_state is required"；
+  #   3. 前端 bundle 里的真实调用代码（见 README）。
+  #
+  # 唯一需要留意的坑：路径是 llm 不是 lim。
+  # 早期那版逆向文档写成 /api/lim/ 是笔误 —— 实测 /api/lim/... 返回的是
+  # Next.js 的 404 HTML（和随便编的路径一模一样），
+  # /api/llm/... 才返回真实的 JSON 校验错误。
+  #
+  # 把某一项设为 "-" 表示"不要发送这个字段"。
+  # -------------------------------------------------------------------------
+  schema:
+    start_path: /api/llm/response_with_tools_start
+    status_path: /api/llm/response_with_tools_status
+    stop_path: /api/llm/response_with_tools_stop
+
+    field_model: model
+    field_messages: messages
+    field_instructions: instructions
+    # 对话内容叫 input（数组），不是 messages。
+    field_input: input
+    field_tools: tools
+    field_stream: stream
+    # 多轮延续与运行上下文。
+    field_previous_response_id: previousResponseId
+    field_metadata: metadata
+    # 调用方身份（OpenAI 的 user / Anthropic 的 metadata.user_id）。
+    # 只写进 metadata，不写请求体顶层。设成 "-" 可整体关闭。
+    # 注意：此字段名属推断值，未经真实报文验证（见 docs 待确认项）。
+    field_user_id: userId
+
+    field_session_id: session_id
+    field_project_id: project_id
+    field_sandbox_id: sandbox_id
+    # 注意大小写不要"顺手统一"：上游 start 用 camelCase 的 conversationId，
+    # 而 status 用 snake_case 的 request_id。
+    field_conversation_id: conversationId
+    field_request_id: request_id
+    # turn_state 是服务端下发的不透明令牌，轮询时必须原样回传；
+    # 自己造一个会被上游拒绝（实测任何自造值都回 "turn_state is required"）。
+    field_turn_state: turn_state
+    field_response_id: response_id
+    field_reasoning: reasoning
+    field_reasoning_effort: effort
+
+    # 追加到每个请求体里的固定字段。
+    field_extra: {}
+
+    # 句柄字段（实测就是 request_id）。
+    resp_id_keys: [request_id, id, response_id, stream_id]
+    resp_status_keys: [status, state, phase]
+    # 正文路径：response.payload.output[-1].content[*].text
+    resp_text_keys: [text, output_text, content, message]
+    resp_delta_keys: [delta, delta_text, chunk, output_text_delta]
+    resp_messages_key: messages
+    resp_error_keys: [error, errors]
+
+    # 实测状态机：start 回 started，status 回 pending，终态是 completed。
+    status_done: [completed, complete, done, succeeded, success, finished, final]
+    status_fail: [failed, error, cancelled, canceled, expired]
+    status_running: [started, pending, running, in_progress, queued, streaming, generating]
+
+  # 项目复用：上游建一个 LaTeX 工程比推理本身还慢，
+  # 同一会话只建一次，之后一直复用。
+  reuse_project: true
+  project_ttl: 30m
+  # 没有会话标识的请求按轮转分桶，避免所有请求挤在一个项目里被串行化。
+  project_pool_size: 4
+
+  # -------------------------------------------------------------------------
+  # 沙箱
+  #
+  # Prism 的 AI 助手跑在一个容器沙箱里，而且它需要「项目工作区」才能工作。
+  # 完整链路是四步——**都已用真实流量验证过**：
+  #
+  #   1. POST /api/backend/1/new                         申请沙箱
+  #   2. POST /api/projects/{id}/sandbox/resources-token  后端签发资源令牌
+  #   3. POST <sandbox>/resources-token                   把令牌交给沙箱
+  #   4. POST /api/y  然后  POST <sandbox>/token          交付 Y-Sweet 文档凭证
+  #
+  # 漏掉 2~4 的症状极具误导性：沙箱**不报任何错**，只是永远停在 syncing，
+  # 最终表现为会话处理**固定 122 秒**后 504 —— 看起来像"上游挂了"或
+  # "容器冷启动慢"，实际上是它在等我们把凭证交给它。
+  #
+  # 好消息：**不需要实现 Yjs**。第 4 步之后是沙箱自己连 Y-Sweet 同步文档，
+  # 我们只负责把凭证送到 —— 所以 Go 侧没有任何 CRDT 依赖。
+  # -------------------------------------------------------------------------
+  # 是否自动走完上面四步。关掉会退化成"申请了沙箱但不同步"，
+  # 那样 start 基本必然失败，只在排查问题时有用。
+  use_sandbox: true
+
+  # 沙箱句柄的缓存时长。分配容器很慢，必须复用。
+  sandbox_ttl: 30m
+
+  # 等「工作区同步完成」的最长等待。
+  #
+  # 注意等的是同步完成而不是容器启动：未就绪时 wait-for-sync 会直接断 TLS
+  # （SSLEOFError），这是正常现象，靠重试熬过去。
+  sandbox_ready_wait: 90s
+
+  # 轮询参数
+  #
+  # 参考实现（Prism 自己的前端）是**固定 5 秒**轮询一次，且 pending 分支
+  # 只读 turn_state 不看 response —— 这暗示 pending 帧里可能没有正文。
+  # 我们取 1 秒作为折中；循环内部有无条件节流，绝不会退化成忙轮询。
+  # 出现 429 就调大这个值。
+  poll_interval: 1s
+  # 连续空轮询时的退避上限。
+  poll_backoff_max: 3s
+  # 机会性长轮询参数：当前上游不认它，发出去也无副作用。
+  use_status_wait: false
+  poll_wait_ms: 10000
+  max_poll_timeout: 15m
+  sync_timeout: 10m
+
+  # 说明：上游没有独立的 system / instructions 字段，
+  # 因此 system / developer 消息会被折成一条前置的 user 消息并入 input。
+  # 相关逻辑见 internal/facade/translate.go。
+
+  expose_raw_metadata: false
+
+  # 可选的全局限流（0 = 不限）。用于保护上游账号不被自己的重试打爆。
+  rate_per_second: 0
+  rate_burst: 0
+
+# ---------------------------------------------------------------------------
+# 原样反代通道
+#
+# 优点：不依赖我们对协议的理解，上游改字段也能用。
+# 用途：接自己的前端，或作为门面出问题时的保底通道。
+# ---------------------------------------------------------------------------
+raw_proxy:
+  enabled: true
+  # 对外挂载路径，例如 /prism/api/projects -> https://prism.openai.com/api/projects
+  prefix: /prism
+
+  # 路径白名单。留空表示全部放开（不推荐，会把账号凭据暴露给任意路径）。
+  allow_paths:
+    - /api/projects
+    - /api/project-access
+    - /api/codex/conversation-history
+    - /api/llm/
+    - /api/lim/
+    - /api/backend/
+    - /api/y
+    - /s/sandboxes/
+    - /api/project-files/
+    - /api/auth/session
+
+  # 允许调用方用自己的凭据覆盖账号池。仅本地调试时开启。
+  passthrough_auth: false
+
+  strip_headers: []
+  buffer_size: 65536
+
+# ---------------------------------------------------------------------------
+# 观测
+# ---------------------------------------------------------------------------
+metrics:
+  enabled: true
+  path: /metrics
+  health_path: /healthz
+  ready_path: /readyz
+
+# ---------------------------------------------------------------------------
+# 抓包：用于校准上面的 schema 字段名
+# ---------------------------------------------------------------------------
+capture:
+  enabled: false
+  dir: captures
+  max_body: 4194304
+  # 把 Authorization / Cookie / Set-Cookie 替换为 ***。
+  # 强烈建议保持 true —— 抓包文件会长期留在磁盘上。
+  redact: true
+  sample: 1.0
+  include_paths: []
+  exclude_paths:
+    - /s/sandboxes/proxy/render
+    - /api/project-files/upload
+
+log:
+  level: info # debug | info | warn | error
+  format: json # json | text

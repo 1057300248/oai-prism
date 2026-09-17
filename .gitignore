@@ -1,0 +1,40 @@
+# 编译产物
+bin/
+*.exe
+oaiprism
+
+# 本地配置与凭据 —— 绝对不能提交
+configs/config.yaml
+secrets/*.json
+!secrets/accounts.example.json
+# cookies.txt 是浏览器导出的真实登录凭据，同样绝不入库
+secrets/cookies.txt
+secrets/*.txt
+
+# 工作区本地数据（会话记录/抓包缓存）
+.workbuddy/
+*.db
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+
+# 日志
+*.log
+
+# 抓包文件可能包含（已打码的）真实报文，同样不提交
+captures/
+*.jsonl
+
+# 测试与覆盖率
+coverage.out
+*.test
+.tmp_doc/
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
+.DS_Store
+
+# 第三方参考资料与逆向分析产物（含 JS bundle，不入库）
+.ref/

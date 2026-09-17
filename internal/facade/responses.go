@@ -1,0 +1,375 @@
+package facade
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"strings"
+	"time"
+
+	"github.com/oai-prism/oaiprism/internal/prism"
+	"github.com/oai-prism/oaiprism/internal/sse"
+)
+
+// handleResponses 实现 POST /v1/responses（OpenAI 新一代 Responses API）。
+//
+// 这是目前 Codex CLI / 新版官方 SDK 的首选端点，
+// 不实现它会导致"用官方工具链连不上"，因此必须支持。
+func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
+	body, err := h.readBody(r)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
+		return
+	}
+
+	req, rawFields, err := decodeJSON[ResponsesRequest](body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "请求体不是合法 JSON: "+err.Error())
+		return
+	}
+
+	// effort 三级回落：reasoning.effort > metadata.reasoning_effort > 模型映射表。
+	effort := ""
+	if req.Reasoning != nil {
+		effort = req.Reasoning.Effort
+	}
+	if strings.TrimSpace(effort) == "" {
+		effort = metadataEffort(rawFields)
+	}
+	model, resolvedEffort := h.resolveModel(req.Model, effort)
+	effort = resolvedEffort
+	accountID, projectID := applyHeaderOverrides(r, &model, &effort)
+
+	// 工具桥：Codex CLI 把工具声明放在 input 的 additional_tools 条目里
+	// （顶层 tools 为 null）。检测到它就切换到桥模式 —— 上游当大脑，
+	// 本地 CLI 当手脚，见 toolbridge.go 顶部注释。
+	bridge := BridgeEnabled(rawFields)
+	input := messagesFromResponsesInput(req.Input, "")
+	if bridge {
+		input = bridgeInputItems(req.Input, "")
+	}
+	if !bridge {
+		if req.Instructions != "" {
+			// instructions 就是 Responses API 的 system，保持 system 角色。
+			input = append([]prism.InputItem{prism.NewSystemItem(req.Instructions)}, input...)
+		} else if h.cfg.Facade.DefaultSystemPrompt != "" {
+			input = append([]prism.InputItem{prism.NewSystemItem(h.cfg.Facade.DefaultSystemPrompt)}, input...)
+		}
+	}
+	if len(input) == 0 {
+		writeError(w, http.StatusBadRequest, "invalid_request_error", "input 不能为空")
+		return
+	}
+
+	runReq := &RunRequest{
+		Model:     model,
+		Effort:    effort,
+		UserID:    req.User,
+		Input:     input,
+		Metadata:  mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
+		StickyKey: responsesConversationKey(r, rawFields, input),
+		AccountID: accountID,
+		ProjectID: projectID,
+		API:       "responses",
+	}
+	// Responses API 原生就有 previous_response_id，直接映射到上游的
+	// previousResponseId —— 这是最"应该"用上会话延续的一条路径。
+	runReq.PreviousResponseID = req.PreviousResponseID
+	runReq.ConversationID = conversationIDFrom(r, rawFields)
+	runReq.Extra = passthroughFields(rawFields, responsesKnownFields)
+
+	id := newID("resp_")
+	created := time.Now().Unix()
+
+	if req.Stream {
+		h.streamResponses(w, r, runReq, id, created, req.Model, bridge)
+		return
+	}
+	h.syncResponses(w, r, runReq, id, created, req.Model, bridge)
+}
+
+var responsesKnownFields = map[string]struct{}{
+	"model": {}, "input": {}, "instructions": {}, "stream": {},
+	"max_output_tokens": {}, "temperature": {}, "top_p": {},
+	"tools": {}, "tool_choice": {}, "reasoning": {}, "metadata": {},
+	"previous_response_id": {}, "previousResponseId": {}, "store": {}, "user": {},
+	// conversation_id 已由 conversationIDFrom 消费，不再透传（见 chatKnownFields）。
+	"conversation_id": {}, "conversationId": {},
+	// Codex CLI（0.15x）专有字段。这些若被当"未知字段"直通上游请求体顶层，
+	// 会触发上游 400（实测：client_metadata / include / prompt_cache_key /
+	// service_tier / text / parallel_tool_calls 都是 CLI 新增字段，上游不认识）。
+	"client_metadata": {}, "include": {}, "prompt_cache_key": {},
+	"service_tier": {}, "text": {}, "parallel_tool_calls": {},
+}
+
+func responsesConversationKey(r *http.Request, body map[string]json.RawMessage, items []prism.InputItem) string {
+	if v := strings.TrimSpace(r.Header.Get(HeaderSession)); v != "" {
+		return "h:" + v
+	}
+	conv := make([]ChatMessage, 0, len(items))
+	for _, it := range items {
+		var sb strings.Builder
+		for _, c := range it.Content {
+			sb.WriteString(c.Text)
+		}
+		conv = append(conv, ChatMessage{Role: it.Role, Content: stringContent(sb.String())})
+	}
+	return conversationKey(r, body, conv)
+}
+
+func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool) {
+	// 流式头必须早于首帧，只能回显客户端带回来的会话 ID（见 streamChat 注释）。
+	setConversationHeader(w, runReq.ConversationID)
+
+	sw, err := sse.New(w)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	defer sw.Close()
+
+	itemID := newID("msg_")
+	buf := make([]byte, 0, 2048)
+
+	// 序言事件：created -> output_item.added -> content_part.added。
+	// 顺序是协议强制的，客户端状态机依赖它。
+	for _, ev := range []string{"response.created", "response.in_progress"} {
+		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{
+			Type: ev, ResponseID: id, Model: publicModel, CreatedAt: created,
+		})
+		if err := sw.WriteRaw(buf); err != nil {
+			return
+		}
+	}
+
+	if bridge {
+		// 桥模式不能边收边发：必须先拿到完整回复才能判断它是
+		// 工具调用（```codex-exec 块）还是纯文本。缓冲后统一输出。
+		var sb strings.Builder
+		var usage *prism.Usage
+		emit := func(d Delta) error {
+			sb.WriteString(d.Text)
+			return nil
+		}
+		res, runErr := h.runner.Run(r.Context(), runReq, emit)
+
+		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "error", Text: runErr.Error()})
+			_ = sw.WriteRaw(buf)
+			return
+		}
+		if res != nil {
+			usage = res.Usage
+		}
+		text := sb.String()
+
+		var js string
+		if js0, ok := extractExecBlock(text); ok {
+			js = ensureExecJS(js0)
+		}
+		if js == "" {
+			// 模型没用桥格式（大概率在云端沙箱里执行后口头汇报）。
+			// 自动纠正一轮：明确告诉它"你的动作没到用户机器上"，
+			// 要求重新以 codex-exec 块输出。只重试一次，避免循环。
+			retry := *runReq
+			retry.Input = append(append([]prism.InputItem{}, runReq.Input...),
+				prism.NewUserItem(bridgeRetryNudge(text)))
+			var sb2 strings.Builder
+			emit2 := func(d Delta) error {
+				sb2.WriteString(d.Text)
+				return nil
+			}
+			res2, runErr2 := h.runner.Run(r.Context(), &retry, emit2)
+			if runErr2 == nil && res2 != nil {
+				if js2, ok2 := extractExecBlock(sb2.String()); ok2 {
+					js = ensureExecJS(js2)
+					text = sb2.String()
+				} else if strings.TrimSpace(sb2.String()) != "" {
+					text = sb2.String()
+				}
+			}
+		}
+
+		if js != "" {
+			callID := newID("ctc_")
+			item := customToolCallItemJSON(callID, js, 0)
+			done := AppendResponsesEvent(buf[:0], ResponsesEvent{
+				Type: "response.output_item.added", ItemJSON: item,
+			})
+			if err := sw.WriteRaw(done); err != nil {
+				return
+			}
+			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
+				Type: "response.custom_tool_call_input.done", ItemID: callID, Text: js,
+			})
+			if err := sw.WriteRaw(done); err != nil {
+				return
+			}
+			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
+				Type: "response.output_item.done", ItemJSON: item,
+			})
+			if err := sw.WriteRaw(done); err != nil {
+				return
+			}
+			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
+				Type:       "response.completed",
+				ResponseID: id, Model: publicModel, CreatedAt: created,
+				OutputJSON: "[" + item + "]",
+			})
+			_ = sw.WriteRaw(done)
+			return
+		}
+
+		// 纯文本：桥模式下一次性给出（模型已完整生成，无需伪增量）。
+		_ = emitTextResponseEvents(sw, &buf, id, publicModel, created, itemID, text, usage)
+		return
+	}
+
+	buf = AppendResponsesEvent(buf[:0], ResponsesEvent{
+		Type: "response.output_item.added", ItemID: itemID,
+	})
+	if err := sw.WriteRaw(buf); err != nil {
+		return
+	}
+	buf = AppendResponsesEvent(buf[:0], ResponsesEvent{
+		Type: "response.content_part.added", ItemID: itemID,
+	})
+	if err := sw.WriteRaw(buf); err != nil {
+		return
+	}
+
+	emit := func(d Delta) error {
+		if d.Text == "" {
+			return nil
+		}
+		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{
+			Type: "response.output_text.delta", ItemID: itemID, Text: d.Text,
+		})
+		return sw.WriteRaw(buf)
+	}
+
+	res, runErr := h.runner.Run(r.Context(), runReq, emit)
+	text := ""
+	var usage *prism.Usage
+	if res != nil {
+		text = res.Text
+		usage = res.Usage
+	}
+
+	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "error", Text: runErr.Error()})
+		_ = sw.WriteRaw(buf)
+		return
+	}
+
+	// 收尾事件必须逐个发全，否则 SDK 会一直等 response.completed。
+	_ = emitTextResponseEvents(sw, &buf, id, publicModel, created, itemID, text, usage)
+}
+
+// emitTextResponseEvents 发文本型回复的收尾事件序列：
+// output_text.done -> content_part.done -> output_item.done -> completed。
+// 返回第一个写错误（如有）。
+func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string, created int64, itemID, text string, usage *prism.Usage) error {
+	events := []ResponsesEvent{
+		{Type: "response.output_text.done", ItemID: itemID, Text: text},
+		{Type: "response.content_part.done", ItemID: itemID, Text: text},
+		{Type: "response.output_item.done", ItemID: itemID, Text: text},
+		{Type: "response.completed", ResponseID: id, Model: publicModel,
+			CreatedAt: created, ItemID: itemID, Text: text, Usage: usage},
+	}
+	for _, ev := range events {
+		*buf = AppendResponsesEvent((*buf)[:0], ev)
+		if err := sw.WriteRaw(*buf); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool) {
+	res, err := h.runner.Run(r.Context(), runReq, nil)
+	if err != nil {
+		status, typ, msg := mapError(err)
+		writeError(w, status, typ, msg)
+		return
+	}
+
+	text := ""
+	var usage *ResponsesUsage
+	var conversationID string
+	if res != nil {
+		text = res.Text
+		conversationID = res.ConversationID
+		if res.Usage != nil {
+			usage = &ResponsesUsage{
+				InputTokens:  res.Usage.InputTokens,
+				OutputTokens: res.Usage.OutputTokens,
+				TotalTokens:  res.Usage.TotalTokens,
+			}
+		}
+	}
+
+	if bridge {
+		// 桥模式：有 exec 块就回 custom_tool_call（CLI 认的形状），
+		// 没有就回普通文本 message。
+		if js0, ok := extractExecBlock(text); ok {
+			js := ensureExecJS(js0)
+			callID := newID("ctc_")
+			setConversationHeader(w, conversationID)
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id": id, "object": "response", "created_at": created,
+				"status": "completed", "model": publicModel,
+				"output": []map[string]any{{
+					"id": callID, "type": "custom_tool_call",
+					"status": "completed", "call_id": callID,
+					"name": "exec", "input": js,
+				}},
+			})
+			return
+		}
+		text = stripExecFence(text)
+	}
+	resp := ResponsesResponse{
+		ID:        id,
+		Object:    "response",
+		CreatedAt: created,
+		Status:    "completed",
+		Model:     publicModel,
+		Output: []ResponsesItem{{
+			Type:   "message",
+			ID:     newID("msg_"),
+			Role:   "assistant",
+			Status: "completed",
+			Content: []ResponsesContent{{
+				Type: "output_text",
+				Text: text,
+			}},
+		}},
+	}
+	if usage != nil {
+		resp.Usage = usage
+	} else {
+		est := estimateTokens(text)
+		resp.Usage = &ResponsesUsage{OutputTokens: est, TotalTokens: est}
+	}
+	if conversationID != "" {
+		resp.ConversationID = conversationID
+		setConversationHeader(w, conversationID)
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// stripExecFence 去掉 codex-exec 围栏（桥模式纯文本路径不再展示它）。
+func stripExecFence(text string) string {
+	const fence = "```codex-exec"
+	idx := strings.Index(text, fence)
+	if idx < 0 {
+		return text
+	}
+	end := strings.Index(text[idx:], "```")
+	if end < 0 {
+		return strings.TrimSpace(text[:idx])
+	}
+	return strings.TrimSpace(text[:idx] + text[idx+end+3:])
+}
