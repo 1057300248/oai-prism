@@ -120,6 +120,9 @@ func bridgePrompt() string {
 		`- You may await multiple exec_command calls in one block; keep the script small and focused.`,
 		``,
 		`Command recipes (the exec_command cmd runs in the CLIENT's native shell — determine the user's OS from the conversation context; Windows uses PowerShell 7 (pwsh), macOS/Linux use bash):`,
+		`- PREFERRED for creating/editing files: the client's built-in apply_patch. It is intercepted by the CLIENT, so its heredoc is parsed by the client — not by the shell — and behaves identically on every OS. Prefer it over shell redirection:`,
+		"  apply_patch <<'PATCH'\n*** Begin Patch\n*** Add File: <path>\n+<line 1>\n+<line 2>\n*** End Patch\nPATCH",
+		`  (every content line must begin with '+'; use '*** Update File: <path>' with @@ hunks to edit an existing file)`,
 		`- Create/overwrite a file, Windows/PowerShell (single cmd string, newlines allowed):`,
 		"  $c = @'\n<FULL FILE CONTENT>\n'@; Set-Content -LiteralPath '<path>' -Value $c -NoNewline",
 		`  (single-quoted here-string @'...'@ does NOT interpolate; always include the FULL file content)`,
@@ -130,6 +133,8 @@ func bridgePrompt() string {
 		`- NEVER use bash-only syntax (printf/cat redirection/heredoc) when the client is Windows — it fails silently and wastes a turn. If the OS cannot be determined, prefer the PowerShell recipe.`,
 		``,
 		`Output rules: outside the block write at most one short sentence of prose. If no tool is needed, reply normally with no block. Always emit the FULL file content in the command — never abbreviate.`,
+		`FINISHING: when a [CLIENT RESULT] confirms success, end with a one-line confirmation in the user's language (e.g. 已创建 pelican-bicycle.html（152 行）). Do NOT ask "what would you like me to work on", and do NOT ask the user to restate the task — the task is already in this conversation and it has been carried out.`,
+		`IMPORTANT: the task text is always present earlier in this conversation (usually the user message right before your reply). If you ever feel "no task was provided", re-read the conversation instead of asking the user to paste it again.`,
 		`Do NOT emit a block for greetings, questions, or small talk, and do NOT run environment checks or "test" commands (like true/echo/ls) to probe the client — emit a block ONLY when the task itself requires an operation on the user's machine.`,
 		"</local_tool_bridge>",
 	}, "\n")
