@@ -207,8 +207,33 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 				}
 				header += "]"
 			}
+			out := textOf(b.Output)
+
+			// 客户端拒绝执行（工具名与它注册的不一致）。原样回放会让模型
+			// 认定"我的工具不被支持"，于是反复要求用户重发任务 —— 表现得
+			// 像上下文丢失，实际是它不知道该怎么办。翻译成可行动的指引。
+			// （真实案例：CLI v0.159 把 exec 改名为 exec_command 后，
+			//   旧会话历史里残留的 unsupported 记录会持续污染整轮对话。）
+			if strings.Contains(out, "unsupported custom tool call") {
+				items = append(items, prism.NewUserItem(
+					header+"\n客户端拒绝了上次调用（工具名不被支持）：`"+
+						truncateRunes(out, 120)+"`。\n"+
+						"这不代表你没有工具 —— 请立刻用客户端注册的工具名重新输出**完整的** "+
+						"```codex-exec 块（包含全部命令与文件内容），客户端会执行它。"+
+						"不要再要求用户重发任务。\n[/CLIENT RESULT]"))
+				continue
+			}
+
+			// 用户主动中断：既不是执行失败，也不是模型的错。明确标注，
+			// 否则模型会困惑于"为什么没有结果"而反复追问。
+			if strings.TrimSpace(out) == "aborted" {
+				items = append(items, prism.NewUserItem(
+					header+"\n（用户主动中断了这次执行，并非工具失败。）\n[/CLIENT RESULT]"))
+				continue
+			}
+
 			items = append(items, prism.NewUserItem(
-				header+"\n"+textOf(b.Output)+"\n[/CLIENT RESULT]"))
+				header+"\n"+out+"\n[/CLIENT RESULT]"))
 		default:
 			// additional_tools / reasoning / 其它非消息条目：跳过。
 		}
