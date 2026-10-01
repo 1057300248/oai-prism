@@ -1292,6 +1292,9 @@ func (c *Client) WaitSandboxReady(ctx context.Context, p Principal, sb *Sandbox,
 	}
 	deadline := time.Now().Add(maxWait)
 	var last *SandboxSyncStatus
+	// 403 容忍次数与常量：见下方 case 的说明。
+	forbidden := 0
+	const maxForbiddenRetries = 5
 
 	for {
 		if ctx.Err() != nil || time.Now().After(deadline) {
@@ -1321,10 +1324,23 @@ func (c *Client) WaitSandboxReady(ctx context.Context, p Principal, sb *Sandbox,
 					}
 				}
 			case status >= 400 && status < 500 &&
-				status != http.StatusRequestTimeout && status != http.StatusTooManyRequests:
-				// 4xx（除超时/限流）说明我们请求本身不对，再等也没用。
+				status != http.StatusRequestTimeout && status != http.StatusTooManyRequests &&
+				status != http.StatusForbidden:
+				// 4xx（除超时/限流/403）说明我们请求本身不对，再等也没用。
 				c.logf("沙箱 wait-for-sync 返回 %d，放弃等待", status)
 				return last, false
+			case status == http.StatusForbidden:
+				// 403 单独处理：实测它是**瞬时**的（应用层
+				// "Request verification failed"，随沙箱会话状态抖动），
+				// 早先把它并入 4xx 立即放弃，导致等待窗口只剩一次请求
+				// （日志里 waited=11s 而配置是 90s），接着上层"硬上 start"
+				// ——上游必然回 122 秒的 workspace_sync_timeout。
+				// 这里改为容忍若干次，给沙箱恢复的机会。
+				forbidden++
+				c.logf("沙箱 wait-for-sync 返回 403（第 %d 次），继续等待", forbidden)
+				if forbidden >= maxForbiddenRetries {
+					return last, false
+				}
 			}
 		}
 		// 网络错误（含 TLS 被断）视为"还没好"，继续等。

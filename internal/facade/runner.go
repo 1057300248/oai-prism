@@ -322,8 +322,18 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 失败同样不阻断：start 会给出明确原因。
 	if sb.Usable() && projectID != "" {
 		if !r.syncSandboxWorkspace(ctx, acct, sb, projectID) {
-			r.log.Warn("沙箱工作区未就绪，仍继续尝试 start",
+			// 同步未就绪还硬上 start，上游**必然**回
+			// "Project file synchronization timed out"（122 秒后 504）——
+			// 用户白等两分钟，看到的还是一个伪装成流断的错误。
+			// 实测（2026-10-01）：跳过同步的 start 100% 走这条路。
+			//
+			// 因此改为快速失败 + 让沙箱整体失效：客户端重试时会拿到
+			// 全新的（沙箱 + 项目）组合，实测成功率高得多。
+			r.sandboxes.Invalidate(acct.ID)
+			r.log.Warn("沙箱工作区同步未就绪，重置沙箱并快速失败（避免上游 122s 超时）",
 				"account", acct.ID, "project", projectID)
+			r.app.SandboxOps.Inc("sync", "reset")
+			return result, fmt.Errorf("沙箱工作区同步未就绪（上游沙箱异常），已重置会话，请重试")
 		}
 	}
 
