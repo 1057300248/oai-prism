@@ -62,24 +62,60 @@ func TestEnsureExecJS(t *testing.T) {
 	}
 }
 
-// TestBridgeEnabled：Codex CLI 把工具放在 input 的 additional_tools 条目，
-// 顶层 tools 为 null —— 必须以 additional_tools 判断。
+// TestBridgeEnabled：Codex CLI 有两条工具声明路径（见 BridgeEnabled 注释）。
+// 早期只认路径 A，导致走路径 B 的客户端桥静默失效（模型退回上游沙箱执行，
+// 本地拿不到文件）。这里把两条路径与"不该误伤"的场景都钉住。
 func TestBridgeEnabled(t *testing.T) {
+	// 路径 A：additional_tools 条目
 	withTools := map[string]json.RawMessage{
 		"input": json.RawMessage(`[{"type":"additional_tools","tools":[]}]`),
 	}
 	if !BridgeEnabled(withTools) {
 		t.Fatal("含 additional_tools 应启用桥")
 	}
-	without := map[string]json.RawMessage{
-		"input": json.RawMessage(`"你好"`),
+
+	// 路径 A 续：已有 custom_tool_call 往返（Codex 独有形状）
+	withCustom := map[string]json.RawMessage{
+		"input": json.RawMessage(`[{"type":"custom_tool_call","name":"exec","input":"..."}]`),
 	}
-	if BridgeEnabled(without) {
-		t.Fatal("纯文本 input 不应启用桥")
+	if !BridgeEnabled(withCustom) {
+		t.Fatal("含 custom_tool_call 应启用桥")
 	}
-	empty := map[string]json.RawMessage{}
-	if BridgeEnabled(empty) {
-		t.Fatal("无 input 不应启用桥")
+
+	// 路径 B：标准 tools 字段 + Codex 独有工具特征
+	withStandardTools := map[string]json.RawMessage{
+		"input": json.RawMessage(`[{"type":"message","role":"user","content":[{"type":"input_text","text":"hi"}]}]`),
+		"tools": json.RawMessage(`[{"type":"custom","name":"exec","description":"run a command"}]`),
+	}
+	if !BridgeEnabled(withStandardTools) {
+		t.Fatal("顶层 tools 含 exec 应启用桥（路径 B）")
+	}
+	withApplyPatch := map[string]json.RawMessage{
+		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
+		"tools": json.RawMessage(`[{"type":"custom","name":"apply_patch"}]`),
+	}
+	if !BridgeEnabled(withApplyPatch) {
+		t.Fatal("顶层 tools 含 apply_patch 应启用桥（路径 B）")
+	}
+
+	// 不该误伤：普通 API 调用方的 function 工具
+	plainFunctions := map[string]json.RawMessage{
+		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
+		"tools": json.RawMessage(`[{"type":"function","name":"get_weather","parameters":{}}]`),
+	}
+	if BridgeEnabled(plainFunctions) {
+		t.Fatal("普通 function 工具不应启用桥（否则破坏正常 function calling）")
+	}
+	// 不该误伤：空 tools / null / 纯文本
+	for name, raw := range map[string]map[string]json.RawMessage{
+		"空 tools":   {"input": json.RawMessage(`[{"type":"message"}]`), "tools": json.RawMessage(`[]`)},
+		"null":      {"input": json.RawMessage(`[{"type":"message"}]`), "tools": json.RawMessage(`null`)},
+		"纯文本 input": {"input": json.RawMessage(`"你好"`)},
+		"无 input":   {},
+	} {
+		if BridgeEnabled(raw) {
+			t.Fatalf("%s 不应启用桥", name)
+		}
 	}
 }
 

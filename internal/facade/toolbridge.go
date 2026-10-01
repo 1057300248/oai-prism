@@ -26,14 +26,55 @@ import (
 
 // BridgeEnabled 判断请求是否启用工具桥。
 //
-// Codex CLI 把工具声明放在 input[0]（type=additional_tools），
-// 顶层 tools 为 null —— 所以不能用顶层 tools 判断。
+// Codex CLI 有**两条工具声明路径**（由模型的 use_responses_lite 元数据决定，
+// 见 codex-rs/core/src/client.rs:908）：
+//
+//	路径 A（lite）  ：工具是 input 里的一个 additional_tools 条目，顶层 tools 为 null
+//	路径 B（标准）  ：工具走顶层 tools 字段（标准 Responses API 形状）
+//
+// 早期只认路径 A —— 走路径 B 的客户端（不同模型/不同 CLI 版本/交互式 TUI）
+// 会让桥静默失效：模型看不到桥指令，就退回**上游沙箱工具**执行，
+// 然后汇报"已创建 xxx" —— 用户本地找不到文件。这是典型的"看起来成功"故障。
+//
+// 路径 B 的识别必须保守：普通 API 调用方也可能带 tools（自定义函数），
+// 误判会把它们拖进桥模式、破坏正常 function calling。所以只在工具集里
+// 出现 **Codex 独有特征**（exec/shell/apply_patch 这类 custom 工具）时才认。
 func BridgeEnabled(raw map[string]json.RawMessage) bool {
 	rawInput, ok := raw["input"]
 	if !ok || len(rawInput) == 0 {
 		return false
 	}
-	return strings.Contains(string(rawInput), `"additional_tools"`)
+	inputStr := string(rawInput)
+
+	// 路径 A：CLI lite 形状。
+	if strings.Contains(inputStr, `"additional_tools"`) {
+		return true
+	}
+	// 已有工具调用往返（custom_tool_call 是 Codex 独有形状）——
+	// 说明会话已经在走桥，后续轮次必须继续走桥。
+	if strings.Contains(inputStr, `"custom_tool_call"`) {
+		return true
+	}
+
+	// 路径 B：标准 tools 字段 + Codex 工具特征。
+	toolsRaw, ok := raw["tools"]
+	if !ok || len(toolsRaw) == 0 {
+		return false
+	}
+	toolsStr := string(toolsRaw)
+	if toolsStr == "null" || toolsStr == "[]" {
+		return false
+	}
+	for _, sig := range []string{
+		`"name":"exec"`, `"name": "exec"`,
+		`"apply_patch"`,
+		`"name":"shell"`, `"name": "shell"`,
+	} {
+		if strings.Contains(toolsStr, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // bridgePrompt 是注入给上游的桥接指令。

@@ -46,6 +46,29 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// （顶层 tools 为 null）。检测到它就切换到桥模式 —— 上游当大脑，
 	// 本地 CLI 当手脚，见 toolbridge.go 顶部注释。
 	bridge := BridgeEnabled(rawFields)
+	// 桥判定诊断：CLI 有两条工具声明路径（use_responses_lite 决定）——
+	// true 走 input 里的 additional_tools 条目（我们认得），
+	// false 走顶层 tools 字段（旧判据认不出，桥会静默失效，
+	// 表现为模型在上游沙箱里干活、用户本地拿不到文件）。
+	// 这行日志用于抓真实请求形状，排查后可按需降级为 Debug。
+	toolsStr := string(rawFields["tools"])
+	h.log.Info("桥判定",
+		"bridge", bridge,
+		"path", func() string {
+			if strings.Contains(string(rawFields["input"]), `"additional_tools"`) {
+				return "A/additional_tools"
+			}
+			if strings.Contains(string(rawFields["input"]), `"custom_tool_call"`) {
+				return "A/custom_tool_call"
+			}
+			if toolsStr != "" && toolsStr != "null" && toolsStr != "[]" {
+				return "B/tools_field"
+			}
+			return "none"
+		}(),
+		"tools_bytes", len(toolsStr),
+		"input_bytes", len(rawFields["input"]),
+	)
 	input := messagesFromResponsesInput(req.Input, "")
 	if bridge {
 		input = bridgeInputItems(req.Input, "")
