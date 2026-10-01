@@ -133,8 +133,6 @@ func bridgePrompt() string {
 		`- NEVER use bash-only syntax (printf/cat redirection/heredoc) when the client is Windows — it fails silently and wastes a turn. If the OS cannot be determined, prefer the PowerShell recipe.`,
 		``,
 		`Output rules: outside the block write at most one short sentence of prose. If no tool is needed, reply normally with no block. Always emit the FULL file content in the command — never abbreviate.`,
-		`FINISHING: when a [CLIENT RESULT] confirms success, end with a one-line confirmation in the user's language (e.g. 已创建 pelican-bicycle.html（152 行）). Do NOT ask "what would you like me to work on", and do NOT ask the user to restate the task — the task is already in this conversation and it has been carried out.`,
-		`IMPORTANT: the task text is always present earlier in this conversation (usually the user message right before your reply). If you ever feel "no task was provided", re-read the conversation instead of asking the user to paste it again.`,
 		`Do NOT emit a block for greetings, questions, or small talk, and do NOT run environment checks or "test" commands (like true/echo/ls) to probe the client — emit a block ONLY when the task itself requires an operation on the user's machine.`,
 		"</local_tool_bridge>",
 	}, "\n")
