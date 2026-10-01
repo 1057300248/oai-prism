@@ -129,6 +129,45 @@ func TestBridgeEnabled(t *testing.T) {
 	}
 }
 
+// TestExecToolName：工具名必须从请求里动态提取。
+//
+// 背景：CLI v0.154 工具名是 exec，v0.159 改成 exec_command。
+// 名字用错时客户端直接拒绝（"unsupported custom tool call: exec"），
+// 模型看不到执行结果，反复要求用户重发内容 —— 表现得像上下文丢失。
+func TestExecToolName(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  map[string]json.RawMessage
+		want string
+	}{
+		{
+			"新版 CLI（exec_command）",
+			map[string]json.RawMessage{"tools": json.RawMessage(`[{"type":"custom","name":"exec_command"},{"name":"write_stdin"}]`)},
+			"exec_command",
+		},
+		{
+			"旧版 CLI（exec）",
+			map[string]json.RawMessage{"tools": json.RawMessage(`[{"type":"custom","name":"exec"}]`)},
+			"exec",
+		},
+		{
+			"路径 A（additional_tools 内含名字）",
+			map[string]json.RawMessage{"input": json.RawMessage(`[{"type":"additional_tools","tools":[{"name":"exec"}]}]`)},
+			"exec",
+		},
+		{
+			"都不认识时兜底 exec",
+			map[string]json.RawMessage{"input": json.RawMessage(`"hi"`)},
+			"exec",
+		},
+	}
+	for _, c := range cases {
+		if got := ExecToolName(c.raw); got != c.want {
+			t.Errorf("%s: got %q, want %q", c.name, got, c.want)
+		}
+	}
+}
+
 // TestBridgeInputItems 覆盖 Codex input 的翻译：
 // 消息保留、工具调用回放为 assistant、工具结果回放为 user。
 func TestBridgeInputItems(t *testing.T) {
@@ -175,7 +214,7 @@ func TestBridgeInputItems(t *testing.T) {
 // 与 Codex CLI 源码 ResponseItem::CustomToolCall 反序列化需求对齐
 // （codex-rs/protocol/src/models.rs: call_id/name/input 为必填）。
 func TestCustomToolCallItemJSON(t *testing.T) {
-	item := customToolCallItemJSON("ctc_1", "await tools.exec_command()", 0)
+	item := customToolCallItemJSON("ctc_1", "await tools.exec_command()", "exec_command")
 	var m map[string]any
 	if err := json.Unmarshal([]byte(item), &m); err != nil {
 		t.Fatalf("不是合法 JSON: %v", err)
@@ -185,7 +224,8 @@ func TestCustomToolCallItemJSON(t *testing.T) {
 			t.Errorf("缺少必填字段 %s: %s", k, item)
 		}
 	}
-	if m["type"] != "custom_tool_call" || m["name"] != "exec" {
+	// name 必须与传入一致（动态工具名：CLI 版本间 exec -> exec_command）
+	if m["type"] != "custom_tool_call" || m["name"] != "exec_command" {
 		t.Errorf("type/name 错误: %s", item)
 	}
 	if m["input"] != "await tools.exec_command()" {

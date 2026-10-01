@@ -114,10 +114,10 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
 
 	if req.Stream {
-		h.streamResponses(w, r, runReq, id, created, req.Model, bridge)
+		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, ExecToolName(rawFields))
 		return
 	}
-	h.syncResponses(w, r, runReq, id, created, req.Model, bridge)
+	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, ExecToolName(rawFields))
 }
 
 var responsesKnownFields = map[string]struct{}{
@@ -149,7 +149,7 @@ func responsesConversationKey(r *http.Request, body map[string]json.RawMessage, 
 	return conversationKey(r, body, conv)
 }
 
-func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool) {
+func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName string) {
 	// 流式头必须早于首帧，只能回显客户端带回来的会话 ID（见 streamChat 注释）。
 	setConversationHeader(w, runReq.ConversationID)
 
@@ -258,7 +258,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 
 		if js != "" {
 			callID := newID("ctc_")
-			item := customToolCallItemJSON(callID, js, 0)
+			item := customToolCallItemJSON(callID, js, execToolName)
 			done := AppendResponsesEvent(buf[:0], ResponsesEvent{
 				Type: "response.output_item.added", ItemJSON: item,
 			})
@@ -352,7 +352,7 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 	return nil
 }
 
-func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool) {
+func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	if err != nil {
 		status, typ, msg := mapError(err)
@@ -388,7 +388,7 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 				"output": []map[string]any{{
 					"id": callID, "type": "custom_tool_call",
 					"status": "completed", "call_id": callID,
-					"name": "exec", "input": js,
+					"name": execToolName, "input": js,
 				}},
 			})
 			return

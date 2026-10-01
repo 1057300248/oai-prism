@@ -297,17 +297,43 @@ text(__out);`)
 	return sb.String()
 }
 
+// ExecToolName 从请求里提取客户端实际注册的 custom 工具名。
+//
+// **必须动态提取**：CLI 的工具名随版本演进 ——
+//
+//	v0.154：exec
+//	v0.159：exec_command（+ write_stdin）
+//
+// 名字用错时客户端不执行、直接拒绝，回一条
+// "[CLIENT RESULT] unsupported custom tool call: exec"，
+// 而模型只看到"没执行"，于是反复说"请把内容再发一遍"——
+// 表现成上下文丢失，实为工具名不匹配。
+//
+// 优先级：exec_command > exec > shell；都不认识时退回 "exec"（旧版兜底）。
+func ExecToolName(raw map[string]json.RawMessage) string {
+	hay := string(raw["tools"]) + string(raw["input"])
+	for _, name := range []string{"exec_command", "exec", "shell"} {
+		if strings.Contains(hay, `"name":"`+name+`"`) || strings.Contains(hay, `"name": "`+name+`"`) {
+			return name
+		}
+	}
+	return "exec"
+}
+
 // customToolCallItemJSON 构造 Responses 协议的 custom_tool_call 条目。
 //
-// Codex 0.15x 的工具是 type=custom（name=exec，input 为自由 JS 源码），
-// 不是 function —— input 直接是源码字符串，不带 arguments 包装。
-func customToolCallItemJSON(id, js string, index int) string {
+// Codex 的工具是 type=custom（input 为自由 JS 源码），不是 function ——
+// input 直接是源码字符串，不带 arguments 包装。
+// name 来自 ExecToolName（随 CLI 版本变化，不能写死）。
+func customToolCallItemJSON(id, js, toolName string) string {
 	var sb strings.Builder
 	sb.WriteString(`{"id":`)
 	writeJSONString(&sb, id)
 	sb.WriteString(`,"type":"custom_tool_call","status":"completed","call_id":`)
 	writeJSONString(&sb, id)
-	sb.WriteString(`,"name":"exec","input":`)
+	sb.WriteString(`,"name":`)
+	writeJSONString(&sb, toolName)
+	sb.WriteString(`,"input":`)
 	writeJSONString(&sb, js)
 	sb.WriteString(`}`)
 	return sb.String()
