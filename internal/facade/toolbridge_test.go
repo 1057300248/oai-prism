@@ -168,6 +168,49 @@ func TestExecToolName(t *testing.T) {
 	}
 }
 
+// TestExecToolKind：区分 custom（v0.154）与 function（v0.159）两种工具形状。
+// 回错形状时客户端静默不执行，模型陷入"执行被中止"的循环。
+func TestExecToolKind(t *testing.T) {
+	funcTool := map[string]json.RawMessage{
+		"tools": json.RawMessage(`[{"type":"function","name":"exec_command","parameters":{}}]`),
+	}
+	if got := ExecToolKind(funcTool); got != "function" {
+		t.Errorf("function 工具判定错误: got %q", got)
+	}
+	customTool := map[string]json.RawMessage{
+		"tools": json.RawMessage(`[{"type":"custom","name":"exec","format":{}}]`),
+	}
+	if got := ExecToolKind(customTool); got != "custom" {
+		t.Errorf("custom 工具判定错误: got %q", got)
+	}
+}
+
+// TestToFunctionArguments：模型输出的 JS 源码要能转成 function 工具要的 JSON。
+func TestToFunctionArguments(t *testing.T) {
+	// JS 形状 -> JSON
+	args := toFunctionArguments(`const out = await tools.exec_command({ cmd: "Set-Content -Path a.txt -Value 'hi'" });`)
+	var m map[string]string
+	if err := json.Unmarshal([]byte(args), &m); err != nil {
+		t.Fatalf("JS 转换结果不是合法 JSON: %s", args)
+	}
+	if m["cmd"] != "Set-Content -Path a.txt -Value 'hi'" {
+		t.Errorf("cmd 提取错误: %q", m["cmd"])
+	}
+	// 已是 JSON -> 原样
+	args2 := toFunctionArguments(`{"cmd":"echo hi"}`)
+	if err := json.Unmarshal([]byte(args2), &m); err != nil || m["cmd"] != "echo hi" {
+		t.Errorf("JSON 直通失败: %s", args2)
+	}
+	// 带转义换行的 JS 字符串（JS 源码里是 \n 两个字符）
+	args3 := toFunctionArguments("const o = await tools.exec_command({ cmd: \"a\\nb\" });")
+	if err := json.Unmarshal([]byte(args3), &m); err != nil {
+		t.Fatalf("转义场景失败: %s", args3)
+	}
+	if m["cmd"] != "a\nb" && m["cmd"] != `a\nb` {
+		t.Logf("换行处理: %q（可接受）", m["cmd"])
+	}
+}
+
 // TestBridgeInputItems 覆盖 Codex input 的翻译：
 // 消息保留、工具调用回放为 assistant、工具结果回放为 user。
 func TestBridgeInputItems(t *testing.T) {

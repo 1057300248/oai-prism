@@ -54,8 +54,10 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// 表现为模型在上游沙箱里干活、用户本地拿不到文件）。
 	// 这行日志用于抓真实请求形状，排查后可按需降级为 Debug。
 	toolsStr := string(rawFields["tools"])
-	// 临时诊断：桥未启用但带 tools 时，dump 工具定义供分析判据（含辅助请求过滤）。
-	if !bridge && len(toolsStr) > 200 {
+	execToolName := ExecToolName(rawFields)
+	execKind := ExecToolKind(rawFields)
+	// 临时诊断：只要带 tools 就 dump（分析 CLI 实际注册的工具名）。
+	if len(toolsStr) > 200 {
 		_ = os.WriteFile(filepath.Join(os.TempDir(), "oaiprism_tools_dump.json"), []byte(toolsStr), 0o600)
 	}
 	h.log.Info("桥判定",
@@ -74,6 +76,7 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		}(),
 		"tools_bytes", len(toolsStr),
 		"input_bytes", len(rawFields["input"]),
+		"exec_tool_name", execToolName,
 	)
 	input := messagesFromResponsesInput(req.Input, "")
 	if bridge {
@@ -114,10 +117,10 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
 
 	if req.Stream {
-		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, ExecToolName(rawFields))
+		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind)
 		return
 	}
-	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, ExecToolName(rawFields))
+	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind)
 }
 
 var responsesKnownFields = map[string]struct{}{
@@ -149,7 +152,7 @@ func responsesConversationKey(r *http.Request, body map[string]json.RawMessage, 
 	return conversationKey(r, body, conv)
 }
 
-func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName string) {
+func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
 	// 流式头必须早于首帧，只能回显客户端带回来的会话 ID（见 streamChat 注释）。
 	setConversationHeader(w, runReq.ConversationID)
 
@@ -258,18 +261,26 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 
 		if js != "" {
 			callID := newID("ctc_")
-			item := customToolCallItemJSON(callID, js, execToolName)
+			var item string
+			if execKind == "function" {
+				item = functionCallItemJSON(callID, execToolName, toFunctionArguments(js))
+			} else {
+				item = customToolCallItemJSON(callID, js, execToolName)
+			}
 			done := AppendResponsesEvent(buf[:0], ResponsesEvent{
 				Type: "response.output_item.added", ItemJSON: item,
 			})
 			if err := sw.WriteRaw(done); err != nil {
 				return
 			}
-			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
-				Type: "response.custom_tool_call_input.done", ItemID: callID, Text: js,
-			})
-			if err := sw.WriteRaw(done); err != nil {
-				return
+			if execKind != "function" {
+				// custom_tool_call 专用事件；function_call 没有这一段。
+				done = AppendResponsesEvent(buf[:0], ResponsesEvent{
+					Type: "response.custom_tool_call_input.done", ItemID: callID, Text: js,
+				})
+				if err := sw.WriteRaw(done); err != nil {
+					return
+				}
 			}
 			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
 				Type: "response.output_item.done", ItemJSON: item,
@@ -352,7 +363,7 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 	return nil
 }
 
-func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName string) {
+func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	if err != nil {
 		status, typ, msg := mapError(err)
@@ -382,14 +393,24 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 			js := ensureExecJS(js0)
 			callID := newID("ctc_")
 			setConversationHeader(w, conversationID)
-			writeJSON(w, http.StatusOK, map[string]any{
-				"id": id, "object": "response", "created_at": created,
-				"status": "completed", "model": publicModel,
-				"output": []map[string]any{{
+			var out any
+			if execKind == "function" {
+				out = map[string]any{
+					"id": callID, "type": "function_call",
+					"status": "completed", "call_id": callID,
+					"name": execToolName, "arguments": toFunctionArguments(js),
+				}
+			} else {
+				out = map[string]any{
 					"id": callID, "type": "custom_tool_call",
 					"status": "completed", "call_id": callID,
 					"name": execToolName, "input": js,
-				}},
+				}
+			}
+			writeJSON(w, http.StatusOK, map[string]any{
+				"id": id, "object": "response", "created_at": created,
+				"status": "completed", "model": publicModel,
+				"output": []any{out},
 			})
 			return
 		}

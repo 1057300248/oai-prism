@@ -345,6 +345,125 @@ func ExecToolName(raw map[string]json.RawMessage) string {
 	return "exec"
 }
 
+// ExecToolKind 判断客户端的 shell 工具是 custom 还是 function 类型。
+//
+// **这是 CLI 版本适配的关键分水岭**：
+//
+//	v0.154：exec 是 custom 工具（type=custom，input 为自由 JS 源码）
+//	v0.159：exec_command 是 function 工具（type=function，arguments 为 JSON）
+//
+// 回错形状时客户端**不会报错**，它只是找不到匹配的 handler、不执行这条调用；
+// 下一轮构造上下文时发现"有调用无结果"，自动补一条 output:"aborted" ——
+// 于是模型看到"执行被中止"，反复重试，用户看到的是无限循环。
+//
+// 判定方式：在 tools 定义里看该工具的 type 字段。
+func ExecToolKind(raw map[string]json.RawMessage) string {
+	hay := string(raw["tools"])
+	if hay == "" || hay == "null" {
+		hay = string(raw["input"])
+	}
+	// function 类型：{"type":"function","name":"exec_command",...}
+	for _, sig := range []string{
+		`"type":"function","name":"exec_command"`, `"type": "function", "name": "exec_command"`,
+		`"type":"function","name":"exec"`, `"type": "function", "name": "exec"`,
+	} {
+		if strings.Contains(hay, sig) {
+			return "function"
+		}
+	}
+	return "custom"
+}
+
+// toFunctionArguments 把模型输出的块内容转成 function 工具需要的 JSON arguments。
+//
+// function 工具（新版 CLI）要的是 {"cmd": "..."}；但模型常按旧习惯输出
+// JS 源码（const out = await tools.exec_command({cmd: "..."})）—— 这里做兜底
+// 提取，两种形状都能转。解析不出 cmd 时退化成原样字符串放在 cmd 字段，
+// 至少让客户端能执行一次（失败也有明确报错，而不是静默不执行）。
+func toFunctionArguments(block string) string {
+	trimmed := strings.TrimSpace(block)
+
+	// 已经是 JSON 对象：{"cmd": "..."} 或 {"command": "..."}
+	if strings.HasPrefix(trimmed, "{") {
+		var m map[string]any
+		if json.Unmarshal([]byte(trimmed), &m) == nil {
+			if _, ok := m["cmd"]; !ok {
+				if v, ok2 := m["command"]; ok2 {
+					m["cmd"] = v
+				}
+			}
+			if b, err := json.Marshal(m); err == nil {
+				return string(b)
+			}
+		}
+	}
+
+	// JS 源码：提取 exec_command({ cmd: "..." }) 里的 cmd 字符串。
+	if cmd, ok := extractJSCmd(trimmed); ok {
+		if b, err := json.Marshal(map[string]string{"cmd": cmd}); err == nil {
+			return string(b)
+		}
+	}
+
+	// 兜底：整段当命令。
+	if b, err := json.Marshal(map[string]string{"cmd": trimmed}); err == nil {
+		return string(b)
+	}
+	return `{"cmd":""}`
+}
+
+// extractJSCmd 从 JS 源码里提取 cmd 参数（支持单/双引号、反引号与转义）。
+func extractJSCmd(js string) (string, bool) {
+	idx := strings.Index(js, "cmd:")
+	if idx < 0 {
+		idx = strings.Index(js, `"cmd"`)
+		if idx < 0 {
+			return "", false
+		}
+	}
+	rest := js[idx:]
+	// 跳到第一个引号
+	q := -1
+	for i, r := range rest {
+		if r == '"' || r == '\'' || r == '`' {
+			q = i
+			break
+		}
+	}
+	if q < 0 {
+		return "", false
+	}
+	quote := rest[q]
+	var sb strings.Builder
+	escaped := false
+	for i := q + 1; i < len(rest); i++ {
+		c := rest[i]
+		if escaped {
+			switch c {
+			case 'n':
+				sb.WriteByte('\n')
+			case 't':
+				sb.WriteByte('\t')
+			case 'r':
+				sb.WriteByte('\r')
+			default:
+				sb.WriteByte(c)
+			}
+			escaped = false
+			continue
+		}
+		if c == '\\' && quote != '`' {
+			escaped = true
+			continue
+		}
+		if c == quote {
+			return sb.String(), sb.Len() > 0
+		}
+		sb.WriteByte(c)
+	}
+	return "", false
+}
+
 // customToolCallItemJSON 构造 Responses 协议的 custom_tool_call 条目。
 //
 // Codex 的工具是 type=custom（input 为自由 JS 源码），不是 function ——
@@ -360,6 +479,25 @@ func customToolCallItemJSON(id, js, toolName string) string {
 	writeJSONString(&sb, toolName)
 	sb.WriteString(`,"input":`)
 	writeJSONString(&sb, js)
+	sb.WriteString(`}`)
+	return sb.String()
+}
+
+// functionCallItemJSON 构造 Responses 协议的 function_call 条目。
+//
+// 新版 CLI（v0.159）把 shell 工具注册为 type=function（exec_command），
+// 回传形状必须是 function_call + JSON arguments；回成 custom_tool_call
+// 时客户端找不到 handler，静默不执行（下一轮被 normalize 补成 aborted）。
+func functionCallItemJSON(id, name, args string) string {
+	var sb strings.Builder
+	sb.WriteString(`{"id":`)
+	writeJSONString(&sb, id)
+	sb.WriteString(`,"type":"function_call","status":"completed","call_id":`)
+	writeJSONString(&sb, id)
+	sb.WriteString(`,"name":`)
+	writeJSONString(&sb, name)
+	sb.WriteString(`,"arguments":`)
+	writeJSONString(&sb, args)
 	sb.WriteString(`}`)
 	return sb.String()
 }
