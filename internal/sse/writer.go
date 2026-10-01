@@ -46,9 +46,14 @@ var ErrClosed = errors.New("sse: writer closed")
 
 // Writer 是 SSE 写出器。
 //
-// 非并发安全：一个 Writer 只应被一个 goroutine 使用
-// （这点符合 HTTP handler 的语义，也避免加锁）。
+// 并发说明：加了 mu 之后写路径是并发安全的 —— 长等待场景需要
+// "心跳 goroutine + 业务 goroutine" 同时写（例如 OAIprism 在等
+// 上游 start+poll 的几分钟里必须持续发 in_progress 保活，
+// 否则中间代理/客户端会因空闲判流断）。写操作本身很短，
+// 锁竞争可忽略。
 type Writer struct {
+	mu sync.Mutex
+
 	w  http.ResponseWriter
 	fl http.Flusher
 
@@ -98,6 +103,8 @@ func NewWithHeaders(w http.ResponseWriter, extra map[string]string) (*Writer, er
 //
 // data 必须是已经序列化好的 JSON（或任意单行文本）。
 func (s *Writer) WriteData(data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
 	}
@@ -120,6 +127,8 @@ func (s *Writer) WriteData(data []byte) error {
 
 // WriteEvent 写一个带 event 名的事件。
 func (s *Writer) WriteEvent(event string, data []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
 	}
@@ -140,6 +149,8 @@ func (s *Writer) WriteEvent(event string, data []byte) error {
 
 // WriteRaw 直接写预编码好的字节（如 DoneFrame / CommentPing）。
 func (s *Writer) WriteRaw(raw []byte) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.err != nil {
 		return s.err
 	}
@@ -150,7 +161,7 @@ func (s *Writer) WriteRaw(raw []byte) error {
 	return s.flushBuffer()
 }
 
-// Ping 发送保活注释。
+// Ping 发送保活注释（长等待期间的心跳；并发安全）。
 func (s *Writer) Ping() error { return s.WriteRaw(CommentPing) }
 
 // Done 发送 [DONE] 结束帧。
@@ -191,6 +202,8 @@ func (s *Writer) flushBuffer() error {
 
 // Stats 返回已写出的字节数与事件数。
 func (s *Writer) Stats() (bytes int64, events int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.bytesWritten, s.events
 }
 
@@ -199,6 +212,8 @@ func (s *Writer) Err() error { return s.err }
 
 // Close 归还缓冲区。必须 defer 调用。
 func (s *Writer) Close() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/oai-prism/oaiprism/internal/prism"
@@ -144,6 +145,40 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		}
 	}
 
+	// 心跳：等待上游期间必须持续发事件保活。
+	//
+	// 为什么必需：start+poll 一轮可能要 1-5 分钟（上游沙箱重试、
+	// xhigh 长推理），期间若一个字节都不发，中间链路（node sidecar、
+	// 反代、Nginx 的 proxy_read_timeout）会按空闲把连接掐掉，
+	// 客户端表现为 "stream closed before response.completed"。
+	// 实测：Codex CLI 0.154/0.159 对长时间静默同样会判流断。
+	heartbeatStop := make(chan struct{})
+	var heartbeatWG sync.WaitGroup
+	heartbeatWG.Add(1)
+	go func() {
+		defer heartbeatWG.Done()
+		t := time.NewTicker(heartbeatInterval)
+		defer t.Stop()
+		for {
+			select {
+			case <-heartbeatStop:
+				return
+			case <-t.C:
+				hb := AppendResponsesEvent(nil, ResponsesEvent{
+					Type: "response.in_progress", ResponseID: id,
+					Model: publicModel, CreatedAt: created,
+				})
+				if err := sw.WriteRaw(hb); err != nil {
+					return // 客户端已断开，主流程会经 ctx 感知
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(heartbeatStop)
+		heartbeatWG.Wait()
+	}()
+
 	if bridge {
 		// 桥模式不能边收边发：必须先拿到完整回复才能判断它是
 		// 工具调用（```codex-exec 块）还是纯文本。缓冲后统一输出。
@@ -156,7 +191,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		res, runErr := h.runner.Run(r.Context(), runReq, emit)
 
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
-			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "error", Text: runErr.Error()})
+			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
 			_ = sw.WriteRaw(buf)
 			return
 		}
@@ -259,7 +294,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 	}
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
-		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "error", Text: runErr.Error()})
+		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
 		_ = sw.WriteRaw(buf)
 		return
 	}
@@ -382,3 +417,10 @@ func extractSentinelToken(r *http.Request) map[string]string {
 	}
 	return extra
 }
+
+// heartbeatInterval 是流式等待期间的心跳间隔。
+//
+// 15 秒：远小于常见反代的 proxy_read_timeout（默认 60s）
+// 与 node http 的默认超时，又不会显著增加事件量
+// （一轮 5 分钟的请求约多 20 个事件，可忽略）。
+const heartbeatInterval = 15 * time.Second

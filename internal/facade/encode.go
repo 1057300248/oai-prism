@@ -313,6 +313,31 @@ func AppendResponsesEvent(dst []byte, e ResponsesEvent) []byte {
 		dst = append(dst, `{"type":"error","code":"server_error","message":`...)
 		dst = sse.AppendJSONString(dst, e.Text)
 		dst = append(dst, '}')
+
+	case "response.failed":
+		// Responses API 的标准失败终止事件。
+		//
+		// 为什么必须有它：只发自定义 "error" 事件时，Codex CLI 的
+		// 状态机等不到任何 *终止* 事件（它只认 completed / failed /
+		// incomplete），于是流一结束就报
+		// "stream closed before response.completed" —— 用户看到的
+		// 是"流莫名断了"，而真正的失败原因（上游 504/沙箱未就绪等）
+		// 完全丢失。实测于 Codex CLI 0.154/0.159。
+		dst = append(dst, `{"type":"response.failed","response":{"id":`...)
+		dst = sse.AppendJSONString(dst, e.ResponseID)
+		dst = append(dst, `,"object":"response","created_at":`...)
+		dst = sse.AppendInt(dst, e.CreatedAt)
+		dst = append(dst, `,"status":"failed","model":`...)
+		dst = sse.AppendJSONString(dst, e.Model)
+		dst = append(dst, `,"output":[],"error":{"code":`...)
+		code := e.Status
+		if code == "" {
+			code = "server_error"
+		}
+		dst = sse.AppendJSONString(dst, code)
+		dst = append(dst, `,"message":`...)
+		dst = sse.AppendJSONString(dst, e.Text)
+		dst = append(dst, `}}}`...)
 	}
 
 	dst = append(dst, "\n\n"...)
