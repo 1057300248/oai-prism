@@ -16,8 +16,23 @@ const http = require("http");
 const PW = "F:/Dev/Repository/npm/global/node_modules/@playwright/mcp/node_modules/playwright-core";
 const { chromium } = require(PW);
 
-const AT = process.argv[2] || "";
+// 参数：node browser_sidecar.js <access_token|"auto"> [port]
+//   auto = 从 secrets/accounts.json 的 cookies 字段自动提取
+//          prism_oai_access_token（免手贴，重启后自愈）
+let AT = process.argv[2] || "";
 const PORT = parseInt(process.argv[3] || "8790", 10);
+if (AT === "auto" || AT === "") {
+  try {
+    const fs2 = require("fs");
+    const accts = JSON.parse(fs2.readFileSync("F:/Code/Active/OAIprism/secrets/accounts.json", "utf-8"));
+    const cookies = (accts.accounts || []).map((a) => a.cookies || "").join("; ");
+    const m = cookies.match(/prism_oai_access_token=([^;\s]+)/);
+    if (m) { AT = m[1]; console.log("[sidecar] 已从 accounts.json 提取 access_token（" + AT.length + " chars）"); }
+    else console.log("[sidecar] accounts.json 未找到 prism_oai_access_token");
+  } catch (e) {
+    console.log("[sidecar] 读取 accounts.json 失败:", String(e).slice(0, 120));
+  }
+}
 const TARGET = "https://prism.openai.com";
 const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36";
 
