@@ -211,6 +211,150 @@ func TestToFunctionArguments(t *testing.T) {
 	}
 }
 
+// TestHasPriorToolResult：已有执行结果时不应再注入"你什么都没执行"的纠错。
+//
+// 实测：任务已跑起来、模型正常收尾输出纯文本时，纠错会把模型带偏，
+// 它转而去要求用户"把原始内容再发一遍"。
+func TestHasPriorToolResult(t *testing.T) {
+	cases := []struct {
+		name string
+		raw  string
+		want bool
+	}{
+		{"function_call_output", `[{"type":"function_call_output","call_id":"c1","output":"ok"}]`, true},
+		{"custom_tool_call_output", `[{"type":"custom_tool_call_output","call_id":"c1","output":"ok"}]`, true},
+		{"首轮无结果", `[{"type":"message","role":"user","content":[{"type":"input_text","text":"create a.txt"}]}]`, false},
+		{"空 input", ``, false},
+	}
+	for _, c := range cases {
+		raw := map[string]json.RawMessage{}
+		if c.raw != "" {
+			raw["input"] = json.RawMessage(c.raw)
+		}
+		if got := hasPriorToolResult(raw); got != c.want {
+			t.Errorf("%s: got %v, want %v", c.name, got, c.want)
+		}
+	}
+}
+
+// TestBridgeResultTextArray：内容数组形态的工具结果必须提取 text。
+//
+// CLI 的结果是 [{"type":"input_text","text":...}]，不提取的话模型读到的是
+// 一坨转义 JSON，读不懂就以为"没有输出"。
+func TestBridgeResultTextArray(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"echo hi\"}"},
+		{"type":"function_call_output","call_id":"c1","output":[{"type":"input_text","text":"Script completed"},{"type":"input_text","text":"{\"chunk_id\":\"x\"}"}]}
+	]`)
+	items := bridgeInputItems(raw, "sys")
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "Script completed") {
+		t.Error("内容数组未提取 text（模型会读到一坨转义 JSON）")
+	}
+	// 泄漏的特征是**转义形式**（数组被当作文本再序列化一遍），
+	// 而不是正常的 input_text 类型名。
+	if strings.Contains(s, `\"input_text\"`) {
+		t.Error("原始 content 数组结构泄漏进了上下文（模型会读到转义 JSON）")
+	}
+}
+
+// TestReplayCallText：上一轮工具调用的回放不能是空块。
+//
+// 背景：function_call 的参数在 arguments（JSON），custom_tool_call 在 input
+// （JS 源码）。只读 input 会让 CLI v0.159 的历史回放变成空块，模型回看时
+// 以为自己的命令丢了，转而要求用户重发内容。
+func TestReplayCallText(t *testing.T) {
+	// JSON 形态（function_call）-> 渲染回 JS
+	got := replayCallText(`{"cmd":"Set-Content -Path 'a.txt' -Value 'hi'"}`)
+	if !strings.Contains(got, "tools.exec_command") || !strings.Contains(got, "Set-Content") {
+		t.Errorf("JSON 参数未渲染成 JS: %s", got)
+	}
+	idx := strings.Index(got, "{ cmd: ")
+	if idx < 0 {
+		t.Fatalf("缺少 cmd 参数: %s", got)
+	}
+	rest := strings.TrimSuffix(strings.TrimSpace(got[idx+len("{ cmd: "):]), "});")
+	var s string
+	if err := json.Unmarshal([]byte(rest), &s); err != nil {
+		t.Errorf("渲染出的 cmd 不是合法 JSON 字符串: %v (%s)", err, rest)
+	} else if s != "Set-Content -Path 'a.txt' -Value 'hi'" {
+		t.Errorf("cmd 内容错误: %q", s)
+	}
+	// JS 形态（custom_tool_call）-> 原样
+	js := `const out = await tools.exec_command({ cmd: "echo hi" });`
+	if replayCallText(js) != js {
+		t.Errorf("JS 应原样回放: %s", replayCallText(js))
+	}
+	if replayCallText("") != "" {
+		t.Error("空参数应返回空（不伪造内容）")
+	}
+}
+
+// TestBridgeInputReplayFunctionCall 是本次线上事故的直接回归。
+//
+// 真实请求里工具调用是
+//
+//	{"type":"function_call","name":"exec_command","arguments":"{\"cmd\":\"...\"}"}
+//
+// 若只读 input 字段，回放块是空的 —— 模型看到自己"什么都没发过"，
+// 于是回复"请把原始命令/内容再发一遍"。
+func TestBridgeInputReplayFunctionCall(t *testing.T) {
+	raw := json.RawMessage(`[
+		{"type":"function_call","name":"exec_command","call_id":"c1","arguments":"{\"cmd\":\"Set-Content -Path 'a.txt' -Value 'hi'\"}"},
+		{"type":"function_call_output","call_id":"c1","output":"Added a.txt (+1 -0)"}
+	]`)
+	items := bridgeInputItems(raw, "sys")
+	b, err := json.Marshal(items)
+	if err != nil {
+		t.Fatalf("序列化失败: %v", err)
+	}
+	s := string(b)
+	if !strings.Contains(s, "Set-Content") {
+		t.Error("function_call 的 arguments 未回放进上下文（历史上会变成空块）")
+	}
+	if !strings.Contains(s, "tools.exec_command") {
+		t.Error("回放未渲染成桥约定的 JS 形态")
+	}
+	if strings.Contains(s, "codex-exec\\n\\n```") {
+		t.Error("出现了空的 codex-exec 回放块")
+	}
+	if !strings.Contains(s, "Added a.txt") {
+		t.Error("function_call_output 的结果未回放进上下文")
+	}
+}
+
+// TestIsShellSyntaxError：区分"语法错"与"逻辑错"。
+//
+// 语法错要给出换语法的指引；逻辑错（文件不存在、权限不足）原样回放即可。
+func TestIsShellSyntaxError(t *testing.T) {
+	yes := []string{
+		"Failed (exit 1)\n2 | cat > a.html <<'HTML'\n  | 重定向运算符后缺少文件规范。",
+		"The '<' operator is reserved for future use.",
+		"ParserError: Unexpected token 'HTML'",
+		"bash: syntax error near unexpected token `newline'",
+		"warning: here-document delimited by end-of-file",
+	}
+	for _, s := range yes {
+		if !isShellSyntaxError(s) {
+			t.Errorf("应判定为语法错: %s", s)
+		}
+	}
+	no := []string{
+		"ENOENT: no such file or directory, open 'a.txt'",
+		"Permission denied",
+		"Added pelican-bicycle.html (+168 -0)",
+	}
+	for _, s := range no {
+		if isShellSyntaxError(s) {
+			t.Errorf("不应判定为语法错: %s", s)
+		}
+	}
+}
+
 // TestBridgeInputItems 覆盖 Codex input 的翻译：
 // 消息保留、工具调用回放为 assistant、工具结果回放为 user。
 func TestBridgeInputItems(t *testing.T) {

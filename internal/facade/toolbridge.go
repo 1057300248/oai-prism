@@ -88,6 +88,18 @@ func BridgeEnabled(raw map[string]json.RawMessage) bool {
 //
 // exec_command 的签名摘要来自真实 CLI 抓包（cmd 是单字符串，PTY 执行，
 // Windows 走 PowerShell 语义），模型必须按它生成 JS，否则本地执行会失败。
+// hasPriorToolResult 判断本次请求的历史里是否已有客户端的执行结果。
+//
+// 有结果 = 模型已经走过一遍桥（任务在推进或已收尾）。此时它输出纯文本
+// 通常是正常总结或追问；再注入"你什么都没执行"的纠错只会把它搞懵 ——
+// 实测它会转而去要求用户把原始内容再发一遍，多绕好几轮。
+// 纠错只在首轮（历史里没有任何结果）才有意义：那时"什么都没执行"是事实。
+func hasPriorToolResult(raw map[string]json.RawMessage) bool {
+	s := string(raw["input"])
+	return strings.Contains(s, `"custom_tool_call_output"`) ||
+		strings.Contains(s, `"function_call_output"`)
+}
+
 func bridgePrompt() string {
 	return strings.Join([]string{
 		"<local_tool_bridge>",
@@ -131,13 +143,18 @@ func bridgePrompt() string {
 // 否则每轮都会重新规划已经做过的操作。
 func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputItem {
 	var blocks []struct {
-		Type    string          `json:"type"`
-		Role    string          `json:"role"`
-		Name    string          `json:"name"`
-		CallID  string          `json:"call_id"`
-		Input   json.RawMessage `json:"input"`
-		Output  json.RawMessage `json:"output"`
-		Content json.RawMessage `json:"content"`
+		Type   string `json:"type"`
+		Role   string `json:"role"`
+		Name   string `json:"name"`
+		CallID string `json:"call_id"`
+		// 工具调用的参数：custom_tool_call 用 input，function_call 用 arguments。
+		// 两者都要读 —— 只读 input 时，CLI v0.159（function 形状）的历史回放
+		// 会变成**空块**，模型回看自己上一轮的命令什么都看不到，于是要求用户
+		// "把原始命令/内容再发一遍"，表现得像上下文丢失。
+		Input     json.RawMessage `json:"input"`
+		Arguments json.RawMessage `json:"arguments"`
+		Output    json.RawMessage `json:"output"`
+		Content   json.RawMessage `json:"content"`
 	}
 	if err := json.Unmarshal(raw, &blocks); err != nil {
 		return nil
@@ -153,6 +170,21 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 		var s string
 		if json.Unmarshal(r, &s) == nil {
 			return s
+		}
+		// 也可能是 content 数组（[{"type":"input_text","text":"..."}]）——
+		// CLI 的工具结果用这种形状。直接 string(r) 会让模型读到一坨转义
+		// JSON，它读不懂就以为"没有输出"，转而要求用户重发内容。
+		var parts []struct {
+			Text string `json:"text"`
+		}
+		if json.Unmarshal(r, &parts) == nil {
+			var sb strings.Builder
+			for _, p := range parts {
+				sb.WriteString(p.Text)
+			}
+			if sb.Len() > 0 {
+				return sb.String()
+			}
 		}
 		return string(r)
 	}
@@ -193,8 +225,15 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 		case "custom_tool_call", "function_call":
 			// 上游"上一轮"发出的调用：以它原始的样子回放，
 			// 让上游维持自己已规划过这些操作的记忆。
+			//
+			// 参数同时看 input 与 arguments（见结构体注释）；渲染回桥约定的
+			// JS 形态，让上下文里只存在一种调用写法，模型不易走偏。
+			call := textOf(b.Input)
+			if strings.TrimSpace(call) == "" {
+				call = textOf(b.Arguments)
+			}
 			items = append(items, prism.NewAssistantItem(
-				"```codex-exec\n"+textOf(b.Input)+"\n```"))
+				"```codex-exec\n"+replayCallText(call)+"\n```"))
 		case "custom_tool_call_output", "function_call_output":
 			header := "[CLIENT RESULT]"
 			if b.CallID != "" || b.Name != "" {
@@ -232,6 +271,21 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 				continue
 			}
 
+			// bash 语法用在 PowerShell 客户端上（`cat > f <<'EOF'` 等）会直接
+			// 语法报错。它和"命令逻辑错"不同 —— 换个语法就能成功，所以必须
+			// 把这一点告诉模型；否则它会以为内容丢了，转而去要求用户
+			// "把原始内容再发一遍"（实测就是在这里绕圈的）。
+			if isShellSyntaxError(out) {
+				items = append(items, prism.NewUserItem(
+					header+"\n"+truncateRunes(out, 300)+"\n"+
+						"CLIENT SHELL NOTE: 这个客户端的 shell 是 Windows PowerShell 7，不是 bash —— "+
+						"`cat >`、`<<'EOF'` heredoc、`printf >` 这类 bash 专用语法在这里会直接语法报错。\n"+
+						"请立刻改用 PowerShell 语法重发**完整的** ```codex-exec 块（内容必须完整，不要省略、不要再要求用户提供原始内容）：\n"+
+						"  const out = await tools.exec_command({ cmd: \"$c = @'\n<完整文件内容>\n'@; Set-Content -LiteralPath '<路径>' -Value $c -NoNewline\" });\n"+
+						"[/CLIENT RESULT]"))
+				continue
+			}
+
 			items = append(items, prism.NewUserItem(
 				header+"\n"+out+"\n[/CLIENT RESULT]"))
 		default:
@@ -266,6 +320,53 @@ func truncateRunes(s string, n int) string {
 	return string(r[:n]) + "..."
 }
 
+// replayCallText 把上一轮的工具调用参数渲染成桥约定的 JS 片段。
+//
+// function_call 的 arguments 是 JSON（{"cmd":"..."}），custom_tool_call 的
+// input 本来就是 JS 源码。统一渲染回 JS，上下文里只存在一种调用写法，
+// 上游更容易维持"我已经规划过这些操作"的记忆，也不会被 JSON 形态带偏。
+func replayCallText(call string) string {
+	call = strings.TrimSpace(call)
+	if call == "" {
+		return call
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(call), &m) != nil {
+		return call // 本来就是 JS 源码
+	}
+	cmd, ok := m["cmd"].(string)
+	if !ok {
+		return call
+	}
+	var sb strings.Builder
+	sb.WriteString("const out = await tools.exec_command({ cmd: ")
+	writeJSONString(&sb, cmd)
+	sb.WriteString(" });")
+	return sb.String()
+}
+
+// isShellSyntaxError 判断客户端输出是否为 shell 语法错误。
+//
+// 与"命令逻辑失败"（文件不存在、权限不足）区别对待：语法错只要换个写法
+// 就能成功，所以翻译时要给出正确语法的示范，而不是让模型回头找内容。
+// 特征串取自 PowerShell 与 POSIX shell 的真实报错文本。
+func isShellSyntaxError(out string) bool {
+	l := strings.ToLower(out)
+	for _, sig := range []string{
+		"重定向运算符后缺少文件规范",                // PowerShell 遇 `cat > f <<'EOF'` 的中文报错
+		"the '<' operator is reserved", // 同场景的英文报错
+		"parsererror",                  // PowerShell 语法错误通用标记
+		"syntax error near unexpected token",
+		"here-document", // bash heredoc 解析失败
+		"unexpected eof while looking for matching",
+	} {
+		if strings.Contains(l, sig) {
+			return true
+		}
+	}
+	return false
+}
+
 // bridgeTailReminder 是追加在消息序列末尾的强化指令。
 func bridgeTailReminder() string {
 	return strings.Join([]string{
@@ -273,6 +374,7 @@ func bridgeTailReminder() string {
 		`OVERRIDE: In THIS session your built-in sandbox tools are DISABLED and DISCONNECTED. Any command you "ran" via built-in tools executed in a throwaway remote container — the user's machine was NOT touched, and the user CANNOT see those files.`,
 		`The ONLY way your actions reach the user's machine is a ` + "```codex-exec" + ` ` + "```" + ` block (executed locally by the client).`,
 		`If the task requires running anything or creating/editing/deleting files, you MUST emit that block in THIS reply — with the FULL command and FULL file content. Do not describe, summarize, or claim completion without it.`,
+		`SHELL SYNTAX: exec_command runs in the client's native PTY — PowerShell on Windows, bash elsewhere. NEVER emit bash-only syntax (` + "`cat >`" + `, ` + "`<<'EOF'`" + ` heredocs, ` + "`printf >`" + `) unless you know the client is macOS/Linux: it fails instantly with a parser error and burns a round trip. For writing files on Windows use the single-quoted here-string recipe (` + "`$c = @'...'@; Set-Content -LiteralPath <path> -Value $c -NoNewline`" + `). If a previous [CLIENT RESULT] shows any shell parser error, switch syntax instead of re-asking the user for content.`,
 		"</local_tool_bridge_reminder>",
 	}, "\n")
 }

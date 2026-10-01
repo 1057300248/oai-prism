@@ -117,7 +117,7 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	created := time.Now().Unix()
 
 	if req.Stream {
-		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind)
+		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind, !hasPriorToolResult(rawFields))
 		return
 	}
 	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind)
@@ -152,7 +152,7 @@ func responsesConversationKey(r *http.Request, body map[string]json.RawMessage, 
 	return conversationKey(r, body, conv)
 }
 
-func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
+func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string, allowNudge bool) {
 	// 流式头必须早于首帧，只能回显客户端带回来的会话 ID（见 streamChat 注释）。
 	setConversationHeader(w, runReq.ConversationID)
 
@@ -236,10 +236,14 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		if js0, ok := extractExecBlock(text); ok {
 			js = ensureExecJS(js0)
 		}
-		if js == "" {
+		if js == "" && allowNudge {
 			// 模型没用桥格式（大概率在云端沙箱里执行后口头汇报）。
 			// 自动纠正一轮：明确告诉它"你的动作没到用户机器上"，
 			// 要求重新以 codex-exec 块输出。只重试一次，避免循环。
+			//
+			// 只在历史里还没有任何执行结果时纠错（首轮）：任务已经跑起来
+			// 之后模型输出纯文本是正常的收尾/追问，再指控它"什么都没执行"
+			// 会把它带偏，转而去要求用户重发原始内容。
 			retry := *runReq
 			retry.Input = append(append([]prism.InputItem{}, runReq.Input...),
 				prism.NewUserItem(bridgeRetryNudge(text)))
