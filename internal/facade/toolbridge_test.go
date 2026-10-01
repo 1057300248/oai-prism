@@ -90,6 +90,16 @@ func TestBridgeEnabled(t *testing.T) {
 	if !BridgeEnabled(withStandardTools) {
 		t.Fatal("顶层 tools 含 exec 应启用桥（路径 B）")
 	}
+	// 关键回归：新版 CLI 的工具名是 exec_command（不是 exec）——
+	// 早期全名匹配 `"name":"exec"` 会漏判，这里钉住。
+	withExecCommand := map[string]json.RawMessage{
+		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
+		"tools": json.RawMessage(`[{"type":"custom","name":"exec_command","description":"Runs a command"},{"type":"custom","name":"write_stdin"}]`),
+	}
+	if !BridgeEnabled(withExecCommand) {
+		t.Fatal("顶层 tools 含 exec_command 应启用桥（路径 B，新版命名）")
+	}
+
 	withApplyPatch := map[string]json.RawMessage{
 		"input": json.RawMessage(`[{"type":"message","role":"user"}]`),
 		"tools": json.RawMessage(`[{"type":"custom","name":"apply_patch"}]`),

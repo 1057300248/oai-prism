@@ -57,6 +57,12 @@ func BridgeEnabled(raw map[string]json.RawMessage) bool {
 	}
 
 	// 路径 B：标准 tools 字段 + Codex 工具特征。
+	//
+	// 用**前缀**匹配而非全名：Codex 的工具名会随版本演进
+	//（旧版 shell、新版 exec_command / write_stdin），
+	// 早期写成全名 "name":"exec" 导致 "exec_command" 漏判 ——
+	// 桥静默失效，模型退回上游沙箱干活。
+	// 前缀匹配 `"name":"exec` 能同时覆盖 exec / exec_command / exec_*。
 	toolsRaw, ok := raw["tools"]
 	if !ok || len(toolsRaw) == 0 {
 		return false
@@ -66,9 +72,10 @@ func BridgeEnabled(raw map[string]json.RawMessage) bool {
 		return false
 	}
 	for _, sig := range []string{
-		`"name":"exec"`, `"name": "exec"`,
-		`"apply_patch"`,
-		`"name":"shell"`, `"name": "shell"`,
+		`"name":"exec`, `"name": "exec`,
+		`"name":"shell`, `"name": "shell`,
+		`"name":"write_stdin`, `"name": "write_stdin`,
+		`"apply_patch`,
 	} {
 		if strings.Contains(toolsStr, sig) {
 			return true

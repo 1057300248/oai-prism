@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -52,6 +54,10 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	// 表现为模型在上游沙箱里干活、用户本地拿不到文件）。
 	// 这行日志用于抓真实请求形状，排查后可按需降级为 Debug。
 	toolsStr := string(rawFields["tools"])
+	// 临时诊断：桥未启用但带 tools 时，dump 工具定义供分析判据（含辅助请求过滤）。
+	if !bridge && len(toolsStr) > 200 {
+		_ = os.WriteFile(filepath.Join(os.TempDir(), "oaiprism_tools_dump.json"), []byte(toolsStr), 0o600)
+	}
 	h.log.Info("桥判定",
 		"bridge", bridge,
 		"path", func() string {
