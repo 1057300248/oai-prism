@@ -86,6 +86,7 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 		Type    string          `json:"type"`
 		Role    string          `json:"role"`
 		Name    string          `json:"name"`
+		CallID  string          `json:"call_id"`
 		Input   json.RawMessage `json:"input"`
 		Output  json.RawMessage `json:"output"`
 		Content json.RawMessage `json:"content"`
@@ -147,8 +148,19 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 			items = append(items, prism.NewAssistantItem(
 				"```codex-exec\n"+textOf(b.Input)+"\n```"))
 		case "custom_tool_call_output", "function_call_output":
+			header := "[CLIENT RESULT]"
+			if b.CallID != "" || b.Name != "" {
+				header = "[CLIENT RESULT"
+				if b.CallID != "" {
+					header += " call_id=" + b.CallID
+				}
+				if b.Name != "" {
+					header += " tool=" + b.Name
+				}
+				header += "]"
+			}
 			items = append(items, prism.NewUserItem(
-				"[CLIENT RESULT]\n"+textOf(b.Output)+"\n[/CLIENT RESULT]"))
+				header+"\n"+textOf(b.Output)+"\n[/CLIENT RESULT]"))
 		default:
 			// additional_tools / reasoning / 其它非消息条目：跳过。
 		}

@@ -479,20 +479,40 @@ func Default() *Config {
 			Enabled:      true,
 			DefaultModel: DefaultPrismModel,
 			Models: map[string]ModelMapping{
-				"gpt-6-astra":      {Model: "gpt-6-astra", ReasoningEffort: "medium", Label: "GPT-6 Astra"},
-				"gpt-6-astra-low":  {Model: "gpt-6-astra", ReasoningEffort: "low", Label: "GPT-6 Astra (Low)"},
-				"gpt-6-astra-high": {Model: "gpt-6-astra", ReasoningEffort: "high", Label: "GPT-6 Astra (High)"},
-				"gpt-6":            {Model: "gpt-6-astra", ReasoningEffort: "medium", Label: "GPT-6"},
-				"astra":            {Model: "gpt-6-astra", ReasoningEffort: "medium", Label: "Astra"},
-				"gpt-5.6-sol":      {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "GPT-5.6 Sol"},
-				"sol":              {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "Sol"},
-				"sol-low":          {Model: "gpt-5.6-sol", ReasoningEffort: "low", Label: "Sol (Low)"},
-				"sol-high":         {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "Sol (High)"},
-				"sol-xhigh":        {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "Sol (Extra High)"},
+				// 6.1 Sol（当前旗舰）
+				"gpt-6.1-sol":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "6.1 Sol"},
+				"gpt-6.1-sol-low":   {Model: "gpt-6.1-sol", ReasoningEffort: "low", Label: "6.1 Sol (Low)"},
+				"gpt-6.1-sol-high":  {Model: "gpt-6.1-sol", ReasoningEffort: "high", Label: "6.1 Sol (High)"},
+				"gpt-6.1-sol-xhigh": {Model: "gpt-6.1-sol", ReasoningEffort: "xhigh", Label: "6.1 Sol (Extra High)"},
+				"6.1-sol":           {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "6.1 Sol (短别名)"},
+				"gpt-6.1":           {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6.1"},
+				// 6 Luna
+				"gpt-6-luna":       {Model: "gpt-6-luna", ReasoningEffort: "medium", Label: "6 Luna"},
+				"gpt-6-luna-high":  {Model: "gpt-6-luna", ReasoningEffort: "high", Label: "6 Luna (High)"},
+				"gpt-6-luna-xhigh": {Model: "gpt-6-luna", ReasoningEffort: "xhigh", Label: "6 Luna (Extra High)"},
+				"6-luna":           {Model: "gpt-6-luna", ReasoningEffort: "medium", Label: "6 Luna (短别名)"},
+				// 5.6 Sol（历史主力，保留兼容）
+				"gpt-5.6-sol": {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "5.6 Sol"},
+				"sol":         {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "Sol"},
+				"sol-low":     {Model: "gpt-5.6-sol", ReasoningEffort: "low", Label: "Sol (Low)"},
+				"sol-high":    {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "Sol (High)"},
+				"sol-xhigh":   {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "Sol (Extra High)"},
 				// 习惯叫法 gpt-5 映射到同一上游模型，方便现有客户端不改配置。
-				"gpt-5":       {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "GPT-5"},
+				"gpt-5":       {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "GPT-5（历史别名）"},
 				"gpt-5-high":  {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "GPT-5 (High)"},
 				"gpt-5-xhigh": {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "GPT-5 (Extra High)"},
+				"prism-sol":   {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "Prism Sol (Codex)"},
+				// 5.6 Terra
+				"gpt-5.6-terra": {Model: "gpt-5.6-terra", ReasoningEffort: "medium", Label: "5.6 Terra"},
+				"terra":         {Model: "gpt-5.6-terra", ReasoningEffort: "medium", Label: "Terra"},
+				"terra-high":    {Model: "gpt-5.6-terra", ReasoningEffort: "high", Label: "Terra (High)"},
+				"terra-xhigh":   {Model: "gpt-5.6-terra", ReasoningEffort: "xhigh", Label: "Terra (Extra High)"},
+				// 已下线模型的兼容重定向：老名字指向当前旗舰，
+				// 让老客户端无感迁移而不是直接吃上游 400。
+				"gpt-6-astra": {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6 Astra（已下线 → 6.1 Sol）"},
+				"astra":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "Astra（已下线 → 6.1 Sol）"},
+				"gpt-6":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6（已下线 → 6.1 Sol）"},
+				"prism-astra": {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "Prism Astra（已下线 → 6.1 Sol）"},
 			},
 			Schema:              defaultSchema(),
 			ReuseProject:        true,
@@ -645,7 +665,11 @@ const DefaultPrismSystemPrompt = "You are the AI assistant inside Prism, " +
 // 来自前端 bundle 里的 `let n="gpt-5.6-sol"`（UI 显示为 "5.6 Sol"）。
 // 真实可用列表由 Statsig 开关 prism_codex_models 动态下发，
 // 因此这个值可能随上游灰度变化 —— 变更时改配置即可，不用改代码。
-const DefaultPrismModel = "gpt-6-astra"
+// 清单来源：Statsig 动态配置 prism_codex_models（2026-10 实测）。
+// 上游会下线/新增模型：gpt-6-astra 已下线（上游路由到
+// codex_v2_restore_start 并返回 400，无创建入口），
+// gpt-6.1-sol / gpt-6-luna 为当前在售。维护时以该配置为准。
+const DefaultPrismModel = "gpt-6.1-sol"
 
 const (
 	// DefaultUserAgent 与 Codex CLI 保持一致的形态，避免被上游按"未知客户端"降级。

@@ -63,15 +63,16 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 
 	runReq := &RunRequest{
-		Model:     model,
-		Effort:    effort,
-		UserID:    req.User,
-		Input:     input,
-		Metadata:  mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
-		StickyKey: responsesConversationKey(r, rawFields, input),
-		AccountID: accountID,
-		ProjectID: projectID,
-		API:       "responses",
+		Model:        model,
+		Effort:       effort,
+		UserID:       req.User,
+		Input:        input,
+		Metadata:     mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
+		StickyKey:    responsesConversationKey(r, rawFields, input),
+		AccountID:    accountID,
+		ProjectID:    projectID,
+		API:          "responses",
+		ExtraHeaders: extractSentinelToken(r),
 	}
 	// Responses API 原生就有 previous_response_id，直接映射到上游的
 	// previousResponseId —— 这是最"应该"用上会话延续的一条路径。
@@ -349,9 +350,6 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 	}
 	if usage != nil {
 		resp.Usage = usage
-	} else {
-		est := estimateTokens(text)
-		resp.Usage = &ResponsesUsage{OutputTokens: est, TotalTokens: est}
 	}
 	if conversationID != "" {
 		resp.ConversationID = conversationID
@@ -372,4 +370,15 @@ func stripExecFence(text string) string {
 		return strings.TrimSpace(text[:idx])
 	}
 	return strings.TrimSpace(text[:idx] + text[idx+end+3:])
+}
+
+// extractSentinelToken 从下游请求头中提取 openai-sentinel-token 或 x-openai-sentinel-token。
+func extractSentinelToken(r *http.Request) map[string]string {
+	extra := make(map[string]string)
+	if tok := strings.TrimSpace(r.Header.Get("openai-sentinel-token")); tok != "" {
+		extra["openai-sentinel-token"] = tok
+	} else if tok := strings.TrimSpace(r.Header.Get("x-openai-sentinel-token")); tok != "" {
+		extra["openai-sentinel-token"] = tok
+	}
+	return extra
 }

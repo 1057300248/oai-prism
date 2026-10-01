@@ -41,15 +41,16 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	accountID, projectID := applyHeaderOverrides(r, &model, &effort)
 
 	runReq := &RunRequest{
-		Model:     model,
-		Effort:    effort,
-		UserID:    req.User,
-		Input:     translateChatMessages(req.Messages, h.cfg.Facade.DefaultSystemPrompt),
-		Metadata:  mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
-		StickyKey: conversationKey(r, rawFields, req.Messages),
-		AccountID: accountID,
-		ProjectID: projectID,
-		API:       "chat",
+		Model:        model,
+		Effort:       effort,
+		UserID:       req.User,
+		Input:        translateChatMessages(req.Messages, h.cfg.Facade.DefaultSystemPrompt),
+		Metadata:     mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
+		StickyKey:    conversationKey(r, rawFields, req.Messages),
+		AccountID:    accountID,
+		ProjectID:    projectID,
+		API:          "chat",
+		ExtraHeaders: extractSentinelToken(r),
 	}
 	// 客户端如果自带上一轮的 response id，就沿用它的会话上下文。
 	runReq.PreviousResponseID = previousResponseIDFrom(r, rawFields)

@@ -146,7 +146,7 @@ export const ApiKeyModal: React.FC<ApiKeyModalProps> = ({ open, onClose }) => {
   -H "Content-Type: application/json" \\
   -H "Authorization: Bearer ${firstKey}" \\
   -d '{
-    "model": "gpt-6-astra",
+    "model": "gpt-6.1-sol",
     "messages": [{"role": "user", "content": "你好！"}]
   }'`;
 
@@ -158,7 +158,7 @@ client = OpenAI(
 )
 
 resp = client.chat.completions.create(
-    model="gpt-6-astra",
+    model="gpt-6.1-sol",
     messages=[{"role": "user", "content": "你好！"}]
 )
 print(resp.choices[0].message.content)`;
@@ -166,7 +166,7 @@ print(resp.choices[0].message.content)`;
   const codexExample = `# 本地 Codex CLI 环境变量接入配置：
 export OPENAI_BASE_URL="http://localhost:8787/v1"
 export OPENAI_API_KEY="${firstKey}"
-export PRISM_MODEL="gpt-6-astra"
+export PRISM_MODEL="gpt-6.1-sol"
 
 codex "帮我分析代码"`;
 

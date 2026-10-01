@@ -158,6 +158,9 @@ func (c *Client) buildHeaders(p Principal, contentType string, accept string) ma
 	h["Sec-Fetch-Dest"] = "empty"
 	h["Sec-Fetch-Mode"] = "cors"
 	h["Sec-Fetch-Site"] = "same-origin"
+	h["sec-ch-ua"] = `"Chromium";v="131", "Not_A Brand";v="24"`
+	h["sec-ch-ua-mobile"] = "?0"
+	h["sec-ch-ua-platform"] = `"Windows"`
 	h["Cache-Control"] = "no-cache"
 	h["Pragma"] = "no-cache"
 

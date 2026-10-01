@@ -26,7 +26,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   models: [],
   sessions: [],
   currentSessionId: null,
-  selectedModel: 'gpt-6-astra',
+  selectedModel: 'gpt-6.1-sol',
   reasoningEffort: 'medium',
   isStreaming: false,
 
@@ -40,7 +40,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       models,
       sessions,
       currentSessionId: defaultSessionId,
-      selectedModel: models[0]?.id || 'gpt-6-astra',
+      selectedModel: models[0]?.id || 'gpt-6.1-sol',
     });
   },
 

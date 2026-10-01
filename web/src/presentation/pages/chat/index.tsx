@@ -106,7 +106,7 @@ export const ChatPlaygroundPage: React.FC = () => {
               <ThoughtChain
                 items={[
                   {
-                    title: 'GPT-6 Astra 深度推理过程',
+                    title: '深度推理过程',
                     status: m.status === 'loading' ? 'loading' : 'success',
                     description: (
                       <Text type="secondary" style={{ whiteSpace: 'pre-wrap', fontSize: 13 }}>
@@ -146,7 +146,7 @@ export const ChatPlaygroundPage: React.FC = () => {
               label: (
                 <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                   <span>{m.name}</span>
-                  {m.id === 'gpt-6-astra' && <Tag color="red" style={{ marginLeft: 6 }}>主模型</Tag>}
+                  {m.id === 'gpt-6.1-sol' && <Tag color="red" style={{ marginLeft: 6 }}>旗舰</Tag>}
                 </div>
               ),
             }))}
@@ -159,6 +159,7 @@ export const ChatPlaygroundPage: React.FC = () => {
               { label: '低 (Low)', value: 'low' },
               { label: '中 (Medium)', value: 'medium' },
               { label: '高 (High)', value: 'high' },
+              { label: '极高 (xHigh)', value: 'xhigh' },
             ]}
           />
         </Space>
@@ -192,7 +193,7 @@ export const ChatPlaygroundPage: React.FC = () => {
                 <RobotOutlined style={{ fontSize: 48, color: '#1677ff' }} />
                 <h3 style={{ marginTop: 16 }}>欢迎体验 OAIprism 交互式调试终端</h3>
                 <p style={{ color: '#888', maxWidth: 500, margin: '0 auto' }}>
-                  直连上游 Prism 代理，支持 GPT-6 Astra、工具调用落盘测试与滑动窗口压缩。
+                  直连上游 Prism 代理，支持 6.1 Sol / Luna / Terra 全系模型、工具调用落盘测试与滑动窗口压缩。
                 </p>
                 <div style={{ marginTop: 24, display: 'inline-block', textAlign: 'left' }}>
                   <Prompts

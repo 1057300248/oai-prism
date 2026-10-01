@@ -118,7 +118,7 @@ export const StatisticsPage: React.FC = () => {
         <Space>
           <FireOutlined style={{ color: m.includes('6') ? '#ff4d4f' : '#1677ff' }} />
           <span style={{ fontWeight: 600 }}>{m}</span>
-          {m === 'gpt-6-astra' && <Tag color="red">当前主模型</Tag>}
+          {m === 'gpt-6.1-sol' && <Tag color="red">当前旗舰</Tag>}
         </Space>
       ),
     },
@@ -352,7 +352,7 @@ export const StatisticsPage: React.FC = () => {
         extra={
           <Space wrap>
             <Input
-              placeholder="按模型过滤 (如 gpt-6-astra)"
+              placeholder="按模型过滤 (如 gpt-6.1-sol)"
               allowClear
               value={modelFilter}
               onChange={(e) => setModelFilter(e.target.value)}

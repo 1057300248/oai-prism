@@ -58,6 +58,9 @@ type RunRequest struct {
 	// Extra 直通到上游 start 请求体顶层。
 	Extra map[string]any
 
+	// ExtraHeaders 是请求级透传头（例如来自客户端的 openai-sentinel-token）。
+	ExtraHeaders map[string]string
+
 	// API 是调用来源标识，仅用于指标标签：chat / responses / messages。
 	API string
 
@@ -117,6 +120,7 @@ type Runner struct {
 	// sandboxes 按账号缓存沙箱。沙箱令牌不绑定项目，按账号缓存即可，
 	// 省掉每次请求都去 POST /api/backend/1/new 的往返与冷启动。
 	sandboxes *sandboxCache
+	journal   *PendingJournal
 	app       *metrics.App
 
 	bucketSeq atomic.Uint64
@@ -133,11 +137,19 @@ func NewRunner(cfg *config.Config, log *slog.Logger, pool *account.Pool, client 
 		client:         client,
 		projects:       newProjectCache(cfg.Facade.ProjectTTL, cfg.Facade.ProjectPoolSize),
 		sandboxes:      newSandboxCache(cfg.Facade.SandboxTTL),
+		journal:        NewPendingJournal(),
 		app:            app,
 		accountRetries: 2,
 	}
 	go r.projects.gc(context.Background())
 	go r.sandboxes.gc(context.Background())
+	go func() {
+		ticker := time.NewTicker(10 * time.Minute)
+		defer ticker.Stop()
+		for range ticker.C {
+			r.journal.Cleanup(1 * time.Hour)
+		}
+	}()
 	return r
 }
 
@@ -253,7 +265,14 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	if cred == nil || !cred.Usable() {
 		return nil, &creds.APIError{Op: "acquire", Status: 401, Body: "账号凭据不可用"}
 	}
-	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
+	extraHeaders := make(map[string]string, len(cred.Headers)+len(req.ExtraHeaders))
+	for k, v := range cred.Headers {
+		extraHeaders[k] = v
+	}
+	for k, v := range req.ExtraHeaders {
+		extraHeaders[k] = v
+	}
+	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: extraHeaders, AccountID: acct.ID}
 
 	result := &RunResult{AccountID: acct.ID, Started: started}
 
@@ -376,6 +395,10 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	result.RequestID = requestID
 	result.ConversationID = convID
 
+	if requestID != "" {
+		r.journal.RecordStart(requestID, convID, acct.ID, projectID, turnState)
+	}
+
 	bumpFirstByte := func() {
 		if !firstAt.IsZero() {
 			return
@@ -389,7 +412,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	if st := startResp.Initial; st != nil {
 		if st.Fail {
 			r.app.ConversationOps.Inc("start", "failed")
-			return result, upstreamError(st)
+			err := upstreamError(st)
+			r.journal.MarkTerminal(requestID, "failed", "", err)
+			return result, err
 		}
 		if st.Text != "" {
 			prev = st.Text
@@ -412,10 +437,12 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			result.OutputItems = st.OutputItems
 		}
 		if st.Done {
+			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
 			return result, nil
 		}
 		if len(st.TurnState) > 0 {
 			turnState = st.TurnState
+			r.journal.UpdateState(requestID, turnState, "pending")
 		}
 	}
 
@@ -489,6 +516,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		// 忘了更新就会一直拿到同一个 pending，表现为"永远不结束"。
 		if len(st.TurnState) > 0 {
 			turnState = st.TurnState
+			r.journal.UpdateState(requestID, turnState, "pending")
 		}
 		if st.Usage != nil {
 			result.Usage = st.Usage
@@ -553,8 +581,11 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			// 关键：失败也算 Done。上游用 HTTP 200 + response.status=error
 			// 表达失败，漏判就会返回一个"成功的空回答"。
 			if st.Fail {
-				return result, upstreamError(st)
+				err := upstreamError(st)
+				r.journal.MarkTerminal(requestID, "failed", "", err)
+				return result, err
 			}
+			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
 			return result, nil
 		}
 	}

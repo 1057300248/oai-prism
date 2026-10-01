@@ -8,7 +8,7 @@ export interface ChatModelInfo {
   description?: string;
 }
 
-export type ReasoningEffort = 'low' | 'medium' | 'high';
+export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
 export interface ChatMessage {
   id: string;

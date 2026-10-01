@@ -13,18 +13,33 @@ export class ChatRepositoryImpl implements IChatRepository {
       const res = await httpClient.get<any>('/v1/models');
       const data = res.data?.data || [];
       if (Array.isArray(data) && data.length > 0) {
-        // 将主力模型置顶
-        const sorted = [...data].sort((a: any, b: any) => {
-          if (a.id === 'gpt-6-astra') return -1;
-          if (b.id === 'gpt-6-astra') return 1;
-          return a.id.localeCompare(b.id);
-        });
+        // 主力模型优先级（与上游 Statsig 清单同步，2026-10）。
+        // 上游模型会下线/新增：astra 已下线（此处不再置顶），
+        // 6.1 Sol 为当前旗舰。
+        const PRIORITY: Record<string, number> = {
+          'gpt-6.1-sol': 0,
+          'gpt-6-luna': 1,
+          'gpt-5.6-terra': 2,
+          'gpt-5.6-sol': 3,
+        };
+        const rank = (id: string) => {
+          if (id in PRIORITY) return PRIORITY[id];
+          // 历史名（astra 等）排后，但仍可用（后端已重定向到当前旗舰）
+          if (/astra|^gpt-6$/.test(id)) return 90;
+          if (/-low$|-xhigh$/.test(id)) return 80; // effort 变体靠后
+          return 50;
+        };
+        const sorted = [...data].sort(
+          (a: any, b: any) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id),
+        );
 
         return sorted.map((m: any) => {
           let desc = '标准对话与推理模型';
-          if (m.id === 'gpt-6-astra') desc = '官方推荐主力模型 · 深度推理与全模态支持';
-          else if (m.id.includes('astra')) desc = 'Astra 变体 · 深度思考';
+          if (m.id === 'gpt-6.1-sol') desc = '当前旗舰 · 最强推理与全模态支持';
+          else if (m.id === 'gpt-6-luna') desc = '6 Luna · 新一代均衡模型';
+          else if (m.id === 'gpt-5.6-terra') desc = '5.6 Terra · 稳定通用';
           else if (m.id.includes('sol')) desc = 'Sol 系列 · 高效响应';
+          else if (/astra|^gpt-6$/.test(m.id)) desc = '已下线模型别名（自动转 6.1 Sol）';
           return {
             id: m.id,
             name: m.name || m.id,
@@ -35,10 +50,12 @@ export class ChatRepositoryImpl implements IChatRepository {
     } catch {
       // 容灾兜底
     }
+    // 兜底清单：与上游 Statsig prism_codex_models 保持一致（2026-10）。
     return [
-      { id: 'gpt-6-astra', name: 'GPT-6 Astra', description: '官方推荐主力模型 · 深度推理与全模态支持' },
-      { id: 'gpt-6', name: 'GPT-6', description: '标准对话与指令生成' },
-      { id: 'gpt-5.6-sol', name: 'GPT-5.6 Sol', description: '兼容经典模型' },
+      { id: 'gpt-6.1-sol', name: '6.1 Sol', description: '当前旗舰 · 最强推理与全模态支持' },
+      { id: 'gpt-6-luna', name: '6 Luna', description: '6 Luna · 新一代均衡模型' },
+      { id: 'gpt-5.6-terra', name: '5.6 Terra', description: '5.6 Terra · 稳定通用' },
+      { id: 'gpt-5.6-sol', name: '5.6 Sol', description: 'Sol 系列 · 高效响应' },
     ];
   }
 
@@ -51,8 +68,8 @@ export class ChatRepositoryImpl implements IChatRepository {
         // 后端无会话记录，在 SQLite 初始化默认引导会话
         const defaultSession: ChatSession = {
           id: 'sess_default_playground',
-          title: 'GPT-6 Astra 调试会话',
-          model: 'gpt-6-astra',
+          title: '6.1 Sol 调试会话',
+          model: 'gpt-6.1-sol',
           reasoningEffort: 'medium',
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -60,7 +77,7 @@ export class ChatRepositoryImpl implements IChatRepository {
             {
               id: 'msg_sys_intro',
               role: 'assistant',
-              content: '你好！我是接入 OAIprism 代理网关的 Codex AI 助手（当前使用 **GPT-6 Astra**）。对话与调试记录已在服务端 SQLite 持久化，请随时发送测试请求！',
+              content: '你好！我是接入 OAIprism 代理网关的 Codex AI 助手（当前使用 **6.1 Sol**）。对话与调试记录已在服务端 SQLite 持久化，请随时发送测试请求！',
               createdAt: new Date().toISOString(),
               status: 'success',
             },

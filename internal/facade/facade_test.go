@@ -796,3 +796,104 @@ func mustRequest(t *testing.T, headers map[string]string) *http.Request {
 	}
 	return r
 }
+
+// ---------------------------- Issue #256 综合回归测试 ----------------------------
+
+func TestIssue256_PendingJournal(t *testing.T) {
+	j := NewPendingJournal()
+	reqID := "req_test_256"
+	convID := "cdx_conv_256"
+	acctID := "acct_1"
+	projectID := "proj_1"
+
+	j.RecordStart(reqID, convID, acctID, projectID, []byte(`{"turn":1}`))
+
+	entry, ok := j.Get(reqID)
+	if !ok || entry.Status != "started" {
+		t.Fatalf("Journal record start 失败: %+v", entry)
+	}
+
+	j.UpdateState(reqID, []byte(`{"turn":2}`), "pending")
+	entry2, _ := j.Get(reqID)
+	if entry2.Status != "pending" || string(entry2.TurnState) != `{"turn":2}` {
+		t.Fatalf("Journal update state 失败: %+v", entry2)
+	}
+
+	j.MarkTerminal(reqID, "completed", "final answer", nil)
+	entry3, _ := j.Get(reqID)
+	if entry3.Status != "completed" || entry3.FinalText != "final answer" {
+		t.Fatalf("Journal mark terminal 失败: %+v", entry3)
+	}
+}
+
+func TestIssue256_ToolBridge_CallIDPreserved(t *testing.T) {
+	inputJSON := `[
+		{"type":"additional_tools","tools":[]},
+		{"type":"message","role":"user","content":"list files"},
+		{"type":"custom_tool_call","name":"exec_command","call_id":"ctc_123","input":"tools.exec_command({cmd:\"dir\"})"},
+		{"type":"custom_tool_call_output","name":"exec_command","call_id":"ctc_123","output":"main.go\ngo.mod"}
+	]`
+	items := bridgeInputItems([]byte(inputJSON), "base sys")
+	if len(items) == 0 {
+		t.Fatalf("bridgeInputItems 解析失败")
+	}
+
+	// 检查最后一个用户条目是否包含 call_id 和工具名称
+	var foundOutput bool
+	for _, it := range items {
+		for _, c := range it.Content {
+			if strings.Contains(c.Text, "ctc_123") && strings.Contains(c.Text, "exec_command") {
+				foundOutput = true
+				break
+			}
+		}
+	}
+	if !foundOutput {
+		t.Errorf("客户端结果回灌未正确包含 call_id 和 tool: %+v", items)
+	}
+}
+
+func TestIssue256_SentinelTokenExtraction(t *testing.T) {
+	r := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	r.Header.Set("openai-sentinel-token", "pow_token_xyz")
+
+	hdr := extractSentinelToken(r)
+	if hdr["openai-sentinel-token"] != "pow_token_xyz" {
+		t.Errorf("未能正确提取 openai-sentinel-token: %v", hdr)
+	}
+
+	r2 := httptest.NewRequest(http.MethodPost, "/v1/responses", nil)
+	r2.Header.Set("X-OpenAI-Sentinel-Token", "pow_token_upper")
+	hdr2 := extractSentinelToken(r2)
+	if hdr2["openai-sentinel-token"] != "pow_token_upper" {
+		t.Errorf("未能正确提取 X-OpenAI-Sentinel-Token: %v", hdr2)
+	}
+}
+
+func TestIssue256_ModelAliases(t *testing.T) {
+	cfg := config.Default()
+	h := &Handler{cfg: cfg}
+
+	m1, _ := h.resolveModel("prism-sol", "")
+	if m1 != "gpt-5.6-sol" {
+		t.Errorf("prism-sol 映射错误: got %q, want gpt-5.6-sol", m1)
+	}
+
+	// astra 已于 2026-10 下线（上游 codex_v2_restore_start 400），
+	// 老别名统一重定向到当前旗舰 gpt-6.1-sol —— 测试锁定的是
+	// "别名必须解析到在售模型" 这个机制，具体目标随清单演进。
+	m2, _ := h.resolveModel("prism-astra", "")
+	if m2 != "gpt-6.1-sol" {
+		t.Errorf("prism-astra 映射错误: got %q, want gpt-6.1-sol", m2)
+	}
+
+	m3, _ := h.resolveModel("gpt-6", "")
+	if m3 != "gpt-6.1-sol" {
+		t.Errorf("gpt-6 映射错误: got %q, want gpt-6.1-sol", m3)
+	}
+
+	m4, _ := h.resolveModel("gpt-6.1-sol", "")
+	if m4 != "gpt-6.1-sol" {
+		t.Errorf("gpt-6.1-sol 映射错误: got %q", m4)
+	}
+}
