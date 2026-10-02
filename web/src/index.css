@@ -1,9 +1,116 @@
-html, body, #root {
+/* ===================================================================
+   OAIprism Dashboard 全局样式
+   设计目标：页面撑满视口、body 级零滚动条、
+   表格区域内部滚动、分页固定底部。
+   =================================================================== */
+
+html,
+body,
+#root {
   margin: 0;
   padding: 0;
-  min-height: 100%;
-  overflow-x: hidden;
+  height: 100%;
+  overflow: hidden; /* body 级零滚动条：滚动全部收敛到内容容器内部 */
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial,
     'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol',
     'Noto Color Emoji';
+}
+
+/* 页面根：填满 Content 容器（Content 高度 = 100vh - 顶栏 64px - 上下边距） */
+.page-fill {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* 长内容页（统计看板等）：在内容容器内部滚动，body 不出现滚动条 */
+.page-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+/* ------------------------------------------------------------------
+   表格填充容器：表格撑满剩余高度，行多时内部滚动，分页固定底部。
+   antd Table 内部结构逐层放开 flex 约束，
+   .ant-table-body 的 inline max-height 用 !important 覆盖为弹性高度。
+   ------------------------------------------------------------------ */
+.table-fill {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fill .ant-table-wrapper {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+/* antd v6 的 Spin 嵌套层：wrapper 与 spin-container 之间是 .ant-spin，必须同样放开 flex */
+.table-fill .ant-table-wrapper .ant-spin {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fill .ant-table-wrapper .ant-spin > .ant-spin-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fill .ant-table-wrapper .ant-table {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fill .ant-table-wrapper .ant-table-container {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.table-fill .ant-table-wrapper .ant-table-body {
+  flex: 1;
+  min-height: 0;
+  max-height: none !important;
+  overflow-y: auto !important;
+}
+
+/* 分页固定在卡片底部，不再随表格行数浮动 */
+.table-fill .ant-table-wrapper .ant-table-pagination.ant-pagination {
+  flex-shrink: 0;
+  margin: 12px 0 0 !important;
+}
+
+/* 单元格内容禁止越界到相邻列 */
+.table-fill .ant-table-cell {
+  overflow: hidden;
+}
+
+/* 凭据构成标签：紧凑无边距，防止撑破列宽 */
+.cred-tags {
+  display: inline-flex;
+  gap: 3px;
+  flex-wrap: nowrap;
+  overflow: hidden;
+  max-width: 100%;
+}
+
+.cred-tags .ant-tag {
+  margin-inline-end: 0;
+  font-size: 11px;
+  line-height: 18px;
+  padding: 0 5px;
+  border-radius: 4px;
 }

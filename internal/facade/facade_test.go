@@ -874,22 +874,24 @@ func TestIssue256_ModelAliases(t *testing.T) {
 	cfg := config.Default()
 	h := &Handler{cfg: cfg}
 
+	// 清单清理（2026-10-02）：别名/下线模型全部移除，prism-sol 原样透传。
 	m1, _ := h.resolveModel("prism-sol", "")
-	if m1 != "gpt-5.6-sol" {
-		t.Errorf("prism-sol 映射错误: got %q, want gpt-5.6-sol", m1)
+	if m1 != "prism-sol" {
+		t.Errorf("prism-sol 应原样透传（不再内置重定向）: got %q", m1)
 	}
 
-	// astra 已于 2026-10 下线（上游 codex_v2_restore_start 400），
-	// 老别名统一重定向到当前旗舰 gpt-6.1-sol —— 测试锁定的是
-	// "别名必须解析到在售模型" 这个机制，具体目标随清单演进。
+	// 已下线模型（astra 系）与历史别名（prism-sol / gpt-5 / 短别名等）已于
+	// 2026-10-02 从对外清单整体移除（configs/config.yaml 与内置默认同步）：
+	// /v1/models 不再展示，resolveModel 也不再重定向 —— 未知名原样透传，
+	// 由上游决定行为。这里锁定的是"清单干净、无隐藏别名"这个契约。
 	m2, _ := h.resolveModel("prism-astra", "")
-	if m2 != "gpt-6.1-sol" {
-		t.Errorf("prism-astra 映射错误: got %q, want gpt-6.1-sol", m2)
+	if m2 != "prism-astra" {
+		t.Errorf("prism-astra 应原样透传（不再内置重定向）: got %q", m2)
 	}
 
 	m3, _ := h.resolveModel("gpt-6", "")
-	if m3 != "gpt-6.1-sol" {
-		t.Errorf("gpt-6 映射错误: got %q, want gpt-6.1-sol", m3)
+	if m3 != "gpt-6" {
+		t.Errorf("gpt-6 应原样透传（不再内置重定向）: got %q", m3)
 	}
 
 	m4, _ := h.resolveModel("gpt-6.1-sol", "")

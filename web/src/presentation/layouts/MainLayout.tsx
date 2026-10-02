@@ -244,8 +244,18 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
           </Space>
         </Header>
 
-        {/* 页面内容容器 */}
-        <Content style={{ margin: '20px 24px 24px' }}>
+        {/* 页面内容容器：高度 = 100vh - 顶栏 64px - 上下边距 16/20，
+            body 级零滚动条，滚动收敛到各页面内部 */}
+        <Content
+          style={{
+            margin: '16px 24px 20px',
+            height: 'calc(100vh - 100px)',
+            minHeight: 0,
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}
+        >
           {children}
         </Content>
 

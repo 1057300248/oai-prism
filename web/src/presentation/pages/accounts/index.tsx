@@ -168,9 +168,9 @@ export const AccountsPage: React.FC = () => {
     {
       title: '凭据构成',
       key: 'credentials',
-      width: 130,
+      width: 150,
       render: (_, record) => (
-        <Space size={4}>
+        <span className="cred-tags">
           <Tooltip title={record.has_access_token ? 'Access Token 正常' : '缺失 Access Token'}>
             <Tag color={record.has_access_token ? 'green' : 'default'}>JWT</Tag>
           </Tooltip>
@@ -182,7 +182,7 @@ export const AccountsPage: React.FC = () => {
               <Tag color="purple">OAuth</Tag>
             </Tooltip>
           )}
-        </Space>
+        </span>
       ),
     },
     {
@@ -283,7 +283,11 @@ export const AccountsPage: React.FC = () => {
 
   return (
     <Card
-      styles={{ body: { padding: '16px 20px 16px' } }}
+      styles={{
+        // 卡片撑满 Content 容器；body 为纵向 flex：工具栏固定、表格撑满、分页贴底
+        body: { padding: '16px 20px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
+      }}
+      style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
       title={
         <Space size="middle">
           <span style={{ fontWeight: 600 }}>账号与计划池列表</span>
@@ -334,8 +338,8 @@ export const AccountsPage: React.FC = () => {
         </Space>
       }
     >
-      {/* 搜索与过滤工具栏 */}
-      <Space orientation="horizontal" size="middle" style={{ marginBottom: 16, width: '100%', flexWrap: 'wrap' }}>
+      {/* 搜索与过滤工具栏（固定高度，不参与表格弹性） */}
+      <Space orientation="horizontal" size="middle" style={{ marginBottom: 16, width: '100%', flexWrap: 'wrap', flexShrink: 0 }}>
         <Input
           placeholder="搜索账号 ID、名称或邮箱..."
           prefix={<SearchOutlined style={{ color: '#aaa' }} />}
@@ -400,27 +404,29 @@ export const AccountsPage: React.FC = () => {
         )}
       </Space>
 
-      {/* 标准自适应分页表格（列宽充足时紧贴容器，不足时提供横向滚动避免挤压/裁切） */}
-      <Table
-        rowKey="id"
-        columns={columns}
-        dataSource={filteredAccounts}
-        loading={loading}
-        scroll={{ x: 1425 }}
-        pagination={{
-          current: currentPage,
-          pageSize: pageSize,
-          total: filteredAccounts.length,
-          showSizeChanger: true,
-          pageSizeOptions: ['5', '10', '20', '50'],
-          showQuickJumper: true,
-          showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条账号`,
-          onChange: (page, size) => {
-            setCurrentPage(page);
-            setPageSize(size);
-          },
-        }}
-      />
+      {/* 标准自适应分页表格：表格撑满剩余高度、行多时内部滚动、分页固定底部（.table-fill） */}
+      <div className="table-fill">
+        <Table
+          rowKey="id"
+          columns={columns}
+          dataSource={filteredAccounts}
+          loading={loading}
+          scroll={{ x: 1445, y: 200 }}
+          pagination={{
+            current: currentPage,
+            pageSize: pageSize,
+            total: filteredAccounts.length,
+            showSizeChanger: true,
+            pageSizeOptions: ['5', '10', '20', '50'],
+            showQuickJumper: true,
+            showTotal: (total, range) => `第 ${range[0]}-${range[1]} 条 / 共 ${total} 条账号`,
+            onChange: (page, size) => {
+              setCurrentPage(page);
+              setPageSize(size);
+            },
+          }}
+        />
+      </div>
 
       <AccountImportModal />
       <PlanDetailDrawer />

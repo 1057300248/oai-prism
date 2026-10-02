@@ -1,11 +1,13 @@
 import { create } from 'zustand';
-import type { ChatMessage, ChatModelInfo, ChatSession, ReasoningEffort } from '../../domain/chat/entity';
+import type { ChatAttachment, ChatMessage, ChatModelInfo, ChatSession, ReasoningEffort } from '../../domain/chat/entity';
+import { effortsForModel } from '../../domain/modelFilter';
 import { ChatRepositoryImpl } from '../../infrastructure/repositories/chat.repo.impl';
 
 const repo = new ChatRepositoryImpl();
 
 interface ChatState {
   models: ChatModelInfo[];
+  allModelIds: string[]; // 全量 id（含档位变体）—— 推导各模型的可用推理档位
   sessions: ChatSession[];
   currentSessionId: string | null;
   selectedModel: string;
@@ -19,11 +21,12 @@ interface ChatState {
   deleteSession: (id: string) => Promise<void>;
   setModel: (model: string) => void;
   setReasoningEffort: (effort: ReasoningEffort) => void;
-  sendMessage: (text: string) => Promise<void>;
+  sendMessage: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
   models: [],
+  allModelIds: [],
   sessions: [],
   currentSessionId: null,
   selectedModel: 'gpt-6.1-sol',
@@ -31,16 +34,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   isStreaming: false,
 
   init: async () => {
-    const [models, sessions] = await Promise.all([
-      repo.getAvailableModels(),
+    const [{ mains, allIds }, sessions] = await Promise.all([
+      repo.fetchModelCatalog(),
       repo.listSessions(),
     ]);
     const defaultSessionId = sessions[0]?.id || null;
     set({
-      models,
+      models: mains,
+      allModelIds: allIds,
       sessions,
       currentSessionId: defaultSessionId,
-      selectedModel: models[0]?.id || 'gpt-6.1-sol',
+      selectedModel: mains[0]?.id || 'gpt-6.1-sol',
+      // 兜底：默认档位若不在新模型的可用列表里，回落 medium
+      reasoningEffort: effortsForModel(mains[0]?.id || 'gpt-6.1-sol', allIds).includes('medium')
+        ? 'medium'
+        : (effortsForModel(mains[0]?.id || 'gpt-6.1-sol', allIds)[0] ?? 'medium'),
     });
   },
 
@@ -71,14 +79,21 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   setModel: (model: string) => {
-    set({ selectedModel: model });
+    // 切换模型时校验当前推理档位：新模型不支持则回落 medium
+    // （各模型的档位由后端配置决定，如 6 Luna 没有 low）
+    const { allModelIds, reasoningEffort } = get();
+    const available = effortsForModel(model, allModelIds);
+    set({
+      selectedModel: model,
+      reasoningEffort: available.includes(reasoningEffort) ? reasoningEffort : 'medium',
+    });
   },
 
   setReasoningEffort: (effort: ReasoningEffort) => {
     set({ reasoningEffort: effort });
   },
 
-  sendMessage: async (text: string) => {
+  sendMessage: async (text: string, attachments?: ChatAttachment[]) => {
     const { currentSessionId, selectedModel, reasoningEffort, sessions } = get();
     if (!text.trim() || !currentSessionId) return;
 
@@ -89,6 +104,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       id: `msg_${Date.now()}_u`,
       role: 'user',
       content: text,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
       createdAt: new Date().toISOString(),
       status: 'success',
     };
@@ -120,6 +136,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     await repo.sendMessageStream({
       sessionId: currentSessionId,
       content: text,
+      attachments,
       model: selectedModel,
       reasoningEffort,
       onChunk: (chunk, reasoningChunk) => {

@@ -24,7 +24,6 @@ export interface MetricSummary {
   accountsTotal: number;
   currentQPS: number;
   avgLatencyMs: number;
-  p95LatencyMs: number;
   projectCacheSize: number;
   uptimeSec: number;
 }
@@ -79,6 +78,7 @@ export interface IStatisticsRepository {
   getAdminStats(): Promise<GlobalAdminStats>;
   getModelUsages(): Promise<ModelUsage[]>;
   getTimeSeries(): Promise<TimeSeriesPoint[]>;
+  getAvailableModelIds(): Promise<string[]>;
   queryRequestLogs(filter: RequestLogFilter): Promise<RequestLogQueryResult>;
 }
 

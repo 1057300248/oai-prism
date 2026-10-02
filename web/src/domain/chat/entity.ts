@@ -5,15 +5,28 @@
 export interface ChatModelInfo {
   id: string;
   name: string;
-  description?: string;
 }
 
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
+
+/** 附件（当前支持图片，走 OpenAI image_url 多模态格式，后端 translate 原生转换） */
+export interface ChatAttachment {
+  name: string;
+  dataUrl: string; // base64 data URL
+}
+
+/** OpenAI 多模态消息内容块 */
+export interface ContentPart {
+  type: 'text' | 'image_url';
+  text?: string;
+  image_url?: { url: string };
+}
 
 export interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
   content: string;
+  attachments?: ChatAttachment[]; // 仅 user 消息：随消息持久化的图片附件
   reasoning?: string;         // 模型思考过程（ThoughtChain 呈现）
   status?: 'loading' | 'success' | 'error';
   createdAt: string;
@@ -32,6 +45,7 @@ export interface ChatSession {
 export interface SendMessageOptions {
   sessionId: string;
   content: string;
+  attachments?: ChatAttachment[];
   model: string;
   reasoningEffort: ReasoningEffort;
   onChunk?: (chunk: string, reasoningChunk?: string) => void;
@@ -40,7 +54,7 @@ export interface SendMessageOptions {
 }
 
 export interface IChatRepository {
-  getAvailableModels(): Promise<ChatModelInfo[]>;
+  fetchModelCatalog(): Promise<{ mains: ChatModelInfo[]; allIds: string[] }>;
   sendMessageStream(options: SendMessageOptions): Promise<void>;
   listSessions(): Promise<ChatSession[]>;
   saveSession(session: ChatSession): Promise<void>;

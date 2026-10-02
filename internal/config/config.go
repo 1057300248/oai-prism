@@ -478,41 +478,28 @@ func Default() *Config {
 		Facade: FacadeConfig{
 			Enabled:      true,
 			DefaultModel: DefaultPrismModel,
+			// 内置清单 = 4 个现役模型 x 各自的推理档位，与 configs/config.yaml 保持一致。
+			// 已下线模型（astra 系）与历史别名（gpt-5、短别名等）不再内置 —— 以
+			// Statsig prism_codex_models 实测清单为准，维护时同步改这里和 yaml。
 			Models: map[string]ModelMapping{
 				// 6.1 Sol（当前旗舰）
 				"gpt-6.1-sol":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "6.1 Sol"},
 				"gpt-6.1-sol-low":   {Model: "gpt-6.1-sol", ReasoningEffort: "low", Label: "6.1 Sol (Low)"},
 				"gpt-6.1-sol-high":  {Model: "gpt-6.1-sol", ReasoningEffort: "high", Label: "6.1 Sol (High)"},
 				"gpt-6.1-sol-xhigh": {Model: "gpt-6.1-sol", ReasoningEffort: "xhigh", Label: "6.1 Sol (Extra High)"},
-				"6.1-sol":           {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "6.1 Sol (短别名)"},
-				"gpt-6.1":           {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6.1"},
 				// 6 Luna
 				"gpt-6-luna":       {Model: "gpt-6-luna", ReasoningEffort: "medium", Label: "6 Luna"},
 				"gpt-6-luna-high":  {Model: "gpt-6-luna", ReasoningEffort: "high", Label: "6 Luna (High)"},
 				"gpt-6-luna-xhigh": {Model: "gpt-6-luna", ReasoningEffort: "xhigh", Label: "6 Luna (Extra High)"},
-				"6-luna":           {Model: "gpt-6-luna", ReasoningEffort: "medium", Label: "6 Luna (短别名)"},
-				// 5.6 Sol（历史主力，保留兼容）
-				"gpt-5.6-sol": {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "5.6 Sol"},
-				"sol":         {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "Sol"},
-				"sol-low":     {Model: "gpt-5.6-sol", ReasoningEffort: "low", Label: "Sol (Low)"},
-				"sol-high":    {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "Sol (High)"},
-				"sol-xhigh":   {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "Sol (Extra High)"},
-				// 习惯叫法 gpt-5 映射到同一上游模型，方便现有客户端不改配置。
-				"gpt-5":       {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "GPT-5（历史别名）"},
-				"gpt-5-high":  {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "GPT-5 (High)"},
-				"gpt-5-xhigh": {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "GPT-5 (Extra High)"},
-				"prism-sol":   {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "Prism Sol (Codex)"},
+				// 5.6 Sol
+				"gpt-5.6-sol":       {Model: "gpt-5.6-sol", ReasoningEffort: "medium", Label: "5.6 Sol"},
+				"gpt-5.6-sol-low":   {Model: "gpt-5.6-sol", ReasoningEffort: "low", Label: "5.6 Sol (Low)"},
+				"gpt-5.6-sol-high":  {Model: "gpt-5.6-sol", ReasoningEffort: "high", Label: "5.6 Sol (High)"},
+				"gpt-5.6-sol-xhigh": {Model: "gpt-5.6-sol", ReasoningEffort: "xhigh", Label: "5.6 Sol (Extra High)"},
 				// 5.6 Terra
-				"gpt-5.6-terra": {Model: "gpt-5.6-terra", ReasoningEffort: "medium", Label: "5.6 Terra"},
-				"terra":         {Model: "gpt-5.6-terra", ReasoningEffort: "medium", Label: "Terra"},
-				"terra-high":    {Model: "gpt-5.6-terra", ReasoningEffort: "high", Label: "Terra (High)"},
-				"terra-xhigh":   {Model: "gpt-5.6-terra", ReasoningEffort: "xhigh", Label: "Terra (Extra High)"},
-				// 已下线模型的兼容重定向：老名字指向当前旗舰，
-				// 让老客户端无感迁移而不是直接吃上游 400。
-				"gpt-6-astra": {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6 Astra（已下线 → 6.1 Sol）"},
-				"astra":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "Astra（已下线 → 6.1 Sol）"},
-				"gpt-6":       {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "GPT-6（已下线 → 6.1 Sol）"},
-				"prism-astra": {Model: "gpt-6.1-sol", ReasoningEffort: "medium", Label: "Prism Astra（已下线 → 6.1 Sol）"},
+				"gpt-5.6-terra":       {Model: "gpt-5.6-terra", ReasoningEffort: "medium", Label: "5.6 Terra"},
+				"gpt-5.6-terra-high":  {Model: "gpt-5.6-terra", ReasoningEffort: "high", Label: "5.6 Terra (High)"},
+				"gpt-5.6-terra-xhigh": {Model: "gpt-5.6-terra", ReasoningEffort: "xhigh", Label: "5.6 Terra (Extra High)"},
 			},
 			Schema:              defaultSchema(),
 			ReuseProject:        true,

@@ -8,6 +8,7 @@ import type {
   RequestLogQueryResult,
   IStatisticsRepository,
 } from '../../domain/statistics/entity';
+import { pickMainModels } from '../../domain/modelFilter';
 import { httpClient } from '../http/client';
 
 export class StatisticsRepositoryImpl implements IStatisticsRepository {
@@ -69,10 +70,21 @@ export class StatisticsRepositoryImpl implements IStatisticsRepository {
       accountsTotal: adminStats.accountsTotal,
       currentQPS: totalReq > 0 ? Number((totalReq / Math.max(adminStats.uptimeSec, 1)).toFixed(2)) : 0,
       avgLatencyMs,
-      p95LatencyMs: Math.round(avgLatencyMs * 1.5),
       projectCacheSize: adminStats.projectCacheSize,
       uptimeSec: adminStats.uptimeSec,
     };
+  }
+
+  /** 当前对外模型 id 清单（configs 的 models 映射，已剔除下线/别名）——
+   *  统计聚合用它过滤 SQLite 历史流水里的旧模型。 */
+  async getAvailableModelIds(): Promise<string[]> {
+    try {
+      const res = await httpClient.get<any>('/v1/models');
+      const data = res.data?.data || [];
+      return pickMainModels(data).map((m: any) => m.id);
+    } catch {
+      return [];
+    }
   }
 
   async getModelUsages(): Promise<ModelUsage[]> {

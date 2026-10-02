@@ -1,62 +1,38 @@
 import type {
+  ChatAttachment,
   ChatModelInfo,
   ChatMessage,
   ChatSession,
   IChatRepository,
   SendMessageOptions,
 } from '../../domain/chat/entity';
+import { compareModelNewestFirst, pickMainModels } from '../../domain/modelFilter';
 import { getApiKey, httpClient } from '../http/client';
 
 export class ChatRepositoryImpl implements IChatRepository {
-  async getAvailableModels(): Promise<ChatModelInfo[]> {
+  async fetchModelCatalog(): Promise<{ mains: ChatModelInfo[]; allIds: string[] }> {
     try {
       const res = await httpClient.get<any>('/v1/models');
       const data = res.data?.data || [];
       if (Array.isArray(data) && data.length > 0) {
-        // 主力模型优先级（与上游 Statsig 清单同步，2026-10）。
-        // 上游模型会下线/新增：astra 已下线（此处不再置顶），
-        // 6.1 Sol 为当前旗舰。
-        const PRIORITY: Record<string, number> = {
-          'gpt-6.1-sol': 0,
-          'gpt-6-luna': 1,
-          'gpt-5.6-terra': 2,
-          'gpt-5.6-sol': 3,
-        };
-        const rank = (id: string) => {
-          if (id in PRIORITY) return PRIORITY[id];
-          // 历史名（astra 等）排后，但仍可用（后端已重定向到当前旗舰）
-          if (/astra|^gpt-6$/.test(id)) return 90;
-          if (/-low$|-xhigh$/.test(id)) return 80; // effort 变体靠后
-          return 50;
-        };
-        const sorted = [...data].sort(
-          (a: any, b: any) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id),
-        );
-
-        return sorted.map((m: any) => {
-          let desc = '标准对话与推理模型';
-          if (m.id === 'gpt-6.1-sol') desc = '当前旗舰 · 最强推理与全模态支持';
-          else if (m.id === 'gpt-6-luna') desc = '6 Luna · 新一代均衡模型';
-          else if (m.id === 'gpt-5.6-terra') desc = '5.6 Terra · 稳定通用';
-          else if (m.id.includes('sol')) desc = 'Sol 系列 · 高效响应';
-          else if (/astra|^gpt-6$/.test(m.id)) desc = '已下线模型别名（自动转 6.1 Sol）';
+        // 后端 /v1/models 已只暴露现役模型（含各自主模型的档位变体）。
+        // mains = 不带档位后缀的条目；allIds 全量保留 —— 各模型的可用推理档位
+        // 由其 effort 变体是否存在推导（domain/modelFilter.ts）。
+        const mains = pickMainModels(data).sort(compareModelNewestFirst);
+        if (mains.length > 0) {
           return {
-            id: m.id,
-            name: m.name || m.id,
-            description: desc,
+            mains: mains.map((m: any) => ({ id: m.id, name: m.name || m.id })),
+            allIds: data.map((m: any) => m.id),
           };
-        });
+        }
       }
     } catch {
-      // 容灾兜底
+      // 容灾兜底：后端不可达时仅保旗舰，避免空 UI
     }
-    // 兜底清单：与上游 Statsig prism_codex_models 保持一致（2026-10）。
-    return [
-      { id: 'gpt-6.1-sol', name: '6.1 Sol', description: '当前旗舰 · 最强推理与全模态支持' },
-      { id: 'gpt-6-luna', name: '6 Luna', description: '6 Luna · 新一代均衡模型' },
-      { id: 'gpt-5.6-terra', name: '5.6 Terra', description: '5.6 Terra · 稳定通用' },
-      { id: 'gpt-5.6-sol', name: '5.6 Sol', description: 'Sol 系列 · 高效响应' },
-    ];
+    return {
+      mains: [{ id: 'gpt-6.1-sol', name: '6.1 Sol' }],
+      allIds: ['gpt-6.1-sol', 'gpt-6.1-sol-low', 'gpt-6.1-sol-high', 'gpt-6.1-sol-xhigh'],
+    };
   }
 
   async listSessions(): Promise<ChatSession[]> {
@@ -93,14 +69,37 @@ export class ChatRepositoryImpl implements IChatRepository {
           let msgs: ChatMessage[] = [];
           try {
             const mRes = await httpClient.get<any[]>(`/admin/chat/sessions/${s.id}/messages`);
-            msgs = (mRes.data || []).map((m: any): ChatMessage => ({
-              id: m.id,
-              role: m.role,
-              content: m.content || '',
-              reasoning: m.reasoning || '',
-              status: m.status || 'success',
-              createdAt: m.created_at || new Date().toISOString(),
-            }));
+            msgs = (mRes.data || []).map((m: any): ChatMessage => {
+              // 多模态兼容：content 若为 JSON 数组串（text + image_url）→ 拆出文本与附件
+              let content: string = m.content || '';
+              let attachments: ChatAttachment[] | undefined;
+              if (content.startsWith('[')) {
+                try {
+                  const parts = JSON.parse(content);
+                  if (Array.isArray(parts)) {
+                    content = parts
+                      .filter((p: any) => p.type === 'text')
+                      .map((p: any) => p.text || '')
+                      .join('\n');
+                    const imgs = parts
+                      .filter((p: any) => p.type === 'image_url' && p.image_url?.url)
+                      .map((p: any) => ({ name: '图片附件', dataUrl: p.image_url.url as string }));
+                    if (imgs.length > 0) attachments = imgs;
+                  }
+                } catch {
+                  // 非 JSON 串，按纯文本处理
+                }
+              }
+              return {
+                id: m.id,
+                role: m.role,
+                content,
+                attachments,
+                reasoning: m.reasoning || '',
+                status: m.status || 'success',
+                createdAt: m.created_at || new Date().toISOString(),
+              };
+            });
           } catch {
             msgs = [];
           }
@@ -159,15 +158,25 @@ export class ChatRepositoryImpl implements IChatRepository {
   }
 
   async sendMessageStream(options: SendMessageOptions): Promise<void> {
-    const { sessionId, model, reasoningEffort, content, onChunk, onError, onFinish } = options;
+    const { sessionId, model, reasoningEffort, content, attachments, onChunk, onError, onFinish } = options;
 
     try {
-      // 1. 先将用户消息持久化入库
+      // 组装 OpenAI 多模态消息：无附件 = 纯字符串；有附件 = text + image_url 内容块
+      // （后端 facade/translate.go 原生支持 image_url → input_image 转换）
+      const userContent: any = attachments && attachments.length > 0
+        ? [
+            { type: 'text', text: content },
+            ...attachments.map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl } })),
+          ]
+        : content;
+      const persistContent = typeof userContent === 'string' ? userContent : JSON.stringify(userContent);
+
+      // 1. 先将用户消息持久化入库（多模态内容以 JSON 串存储，读取端解析）
       const userMsgId = `msg_u_${Date.now()}`;
       await httpClient.post(`/admin/chat/sessions/${sessionId}/messages`, {
         id: userMsgId,
         role: 'user',
-        content,
+        content: persistContent,
         status: 'success',
       }).catch(() => {});
 
@@ -187,7 +196,7 @@ export class ChatRepositoryImpl implements IChatRepository {
           messages: [
             {
               role: 'user',
-              content,
+              content: userContent,
             },
           ],
         }),

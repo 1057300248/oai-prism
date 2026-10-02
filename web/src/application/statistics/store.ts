@@ -15,6 +15,7 @@ interface StatisticsState {
   modelUsages: ModelUsage[];
   timeSeries: TimeSeriesPoint[];
   loading: boolean;
+  currentModelIds: string[]; // 当前对外模型 id（/v1/models），过滤历史流水里的旧模型
 
   // 请求流水明细状态
   requestLogs: RequestLog[];
@@ -34,6 +35,7 @@ export const useStatisticsStore = create<StatisticsState>((set, get) => ({
   modelUsages: [],
   timeSeries: [],
   loading: false,
+  currentModelIds: [],
 
   requestLogs: [],
   requestLogsTotal: 0,
@@ -45,12 +47,13 @@ export const useStatisticsStore = create<StatisticsState>((set, get) => ({
   fetchMetrics: async () => {
     set({ loading: true });
     try {
-      const [summary, modelUsages, timeSeries] = await Promise.all([
+      const [summary, modelUsages, timeSeries, currentModelIds] = await Promise.all([
         repo.getSummary(),
         repo.getModelUsages(),
         repo.getTimeSeries(),
+        repo.getAvailableModelIds(),
       ]);
-      set({ summary, modelUsages, timeSeries });
+      set({ summary, modelUsages, timeSeries, currentModelIds });
     } finally {
       set({ loading: false });
     }

@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useMemo } from 'react';
 import {
   Card,
   Row,
@@ -19,13 +19,13 @@ import {
   LineChartOutlined,
   CheckCircleOutlined,
   ReloadOutlined,
-  FireOutlined,
-  FolderOpenOutlined,
+  ThunderboltOutlined,
   SearchOutlined,
   EyeOutlined,
   FieldTimeOutlined,
 } from '@ant-design/icons';
 import { Area, Pie } from '@ant-design/plots';
+import { stripEffort } from '../../../domain/modelFilter';
 import { useStatisticsStore } from '../../../application/statistics/store';
 import type { RequestLog } from '../../../domain/statistics/entity';
 
@@ -88,58 +88,48 @@ export const StatisticsPage: React.FC = () => {
     },
   };
 
+  // 现役主模型过滤：以「当前 /v1/models 清单」为准（后端 config 已剔除下线模型），
+  // SQLite 历史流水里的旧模型（astra 系等）与档位变体不再出现在分布图中：
+  //   剥离档位后缀 → 必须在当前清单内；变体调用量归并到主模型（加权平均时延）。
+  const currentModelIds = useStatisticsStore((s) => s.currentModelIds);
+  const activeUsages = useMemo(() => {
+    const merged = new Map<string, { requests: number; avgLatencyMs: number }>();
+    for (const u of modelUsages) {
+      const main = stripEffort(u.model);
+      if (currentModelIds.length > 0 && !currentModelIds.includes(main)) continue;
+      const prev = merged.get(main) || { requests: 0, avgLatencyMs: 0 };
+      // 加权平均时延
+      const total = prev.requests + u.requests;
+      const avg = total > 0 ? (prev.avgLatencyMs * prev.requests + u.avgLatencyMs * u.requests) / total : 0;
+      merged.set(main, { requests: total, avgLatencyMs: Math.round(avg) });
+    }
+    const totalReq = [...merged.values()].reduce((s, v) => s + v.requests, 0) || 1;
+    return [...merged.entries()]
+      .map(([model, v]) => ({
+        model,
+        requests: v.requests,
+        avgLatencyMs: v.avgLatencyMs,
+        percentage: Math.round((v.requests / totalReq) * 1000) / 10,
+      }))
+      .sort((a, b) => b.requests - a.requests);
+  }, [modelUsages, currentModelIds]);
+
+  // 与饼图共享的固定色板（保证图例/列表颜色一一对应）
+  const MODEL_PALETTE = ['#1677ff', '#00c4a3', '#faad14', '#ff7a45', '#9254de', '#2d8cf0'];
+
   // 饼图配置 (模型调用分布)
+  // 外置 label 关闭 —— 模型名/占比/请求数/均延迟全部由右侧紧凑列表承担，
+  // 避免小卡片下标签被裁剪出孤立 "%"。
   const pieConfig = {
-    data: modelUsages,
+    data: activeUsages,
     angleField: 'requests',
     colorField: 'model',
     radius: 0.8,
     innerRadius: 0.6,
-    label: {
-      text: (d: any) => `${d.model}: ${d.percentage}%`,
-      position: 'outside',
-    },
-    legend: {
-      color: {
-        title: false,
-        position: 'right',
-        rowPadding: 5,
-      },
-    },
+    scale: { color: { range: MODEL_PALETTE } },
+    label: false,
+    legend: false,
   };
-
-  // 模型统计列
-  const modelColumns = [
-    {
-      title: '模型名称',
-      dataIndex: 'model',
-      key: 'model',
-      render: (m: string) => (
-        <Space>
-          <FireOutlined style={{ color: m.includes('6') ? '#ff4d4f' : '#1677ff' }} />
-          <span style={{ fontWeight: 600 }}>{m}</span>
-          {m === 'gpt-6.1-sol' && <Tag color="red">当前旗舰</Tag>}
-        </Space>
-      ),
-    },
-    {
-      title: '调用请求数',
-      dataIndex: 'requests',
-      key: 'requests',
-    },
-    {
-      title: '流量占比',
-      dataIndex: 'percentage',
-      key: 'percentage',
-      render: (p: number) => `${p}%`,
-    },
-    {
-      title: '平均时延',
-      dataIndex: 'avgLatencyMs',
-      key: 'avgLatencyMs',
-      render: (ms: number) => `${ms} ms`,
-    },
-  ];
 
   // 请求流水明细列
   const requestLogColumns = [
@@ -245,7 +235,9 @@ export const StatisticsPage: React.FC = () => {
   ];
 
   return (
-    <Space orientation="vertical" size="large" style={{ width: '100%' }}>
+    <div className="page-fill">
+      <div className="page-scroll">
+      <Space orientation="vertical" size="large" style={{ width: '100%' }}>
       {/* 顶部真实指标卡片 */}
       <Row gutter={[16, 16]}>
         <Col xs={24} sm={12} md={6}>
@@ -291,13 +283,13 @@ export const StatisticsPage: React.FC = () => {
         <Col xs={24} sm={12} md={6}>
           <Card hoverable>
             <Statistic
-              title="沙箱项目缓存池"
-              value={summary?.projectCacheSize || 0}
-              prefix={<FolderOpenOutlined style={{ color: '#722ed1' }} />}
-              suffix="个工作区"
+              title="请求明细记录"
+              value={requestLogsTotal}
+              prefix={<ThunderboltOutlined style={{ color: '#722ed1' }} />}
+              suffix="笔"
             />
             <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
-              持久化引擎: SQLite 零模拟假数据
+              SQLite 全量审计 · 每笔真实请求
             </div>
           </Card>
         </Col>
@@ -305,7 +297,7 @@ export const StatisticsPage: React.FC = () => {
 
       {/* 图表展示区 */}
       <Row gutter={[16, 16]}>
-        <Col xs={24} lg={16}>
+        <Col xs={24} lg={14}>
           <Card
             title="真实请求吞吐走势"
             extra={
@@ -325,17 +317,60 @@ export const StatisticsPage: React.FC = () => {
             </div>
           </Card>
         </Col>
-        <Col xs={24} lg={8}>
-          <Card title="模型真实调用分布">
-            <div style={{ height: 300 }}>
-              {modelUsages.length > 0 ? (
-                <Pie {...pieConfig} />
-              ) : (
-                <div style={{ textAlign: 'center', paddingTop: 100, color: '#999' }}>
-                  暂无模型调用分布记录
-                </div>
-              )}
-            </div>
+        <Col xs={24} lg={10}>
+          <Card title="模型真实调用分布" styles={{ body: { padding: '12px 16px' } }}>
+            {activeUsages.length > 0 ? (
+              <Row gutter={8} align="middle">
+                {/* 环形图：外部标签与图例全部关闭，信息由右侧列表承担 */}
+                <Col span={11} style={{ height: 280 }}>
+                  <Pie {...pieConfig} />
+                </Col>
+                {/* 紧凑模型列表：取代原独立「模型性能明细」表格（内容重复） */}
+                <Col span={13}>
+                  {activeUsages.map((u, i) => (
+                    <div
+                      key={u.model}
+                      style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        gap: 8,
+                        padding: '7px 0',
+                        borderBottom: i < activeUsages.length - 1 ? '1px solid #f5f5f5' : 'none',
+                      }}
+                    >
+                      <span
+                        style={{
+                          width: 8,
+                          height: 8,
+                          borderRadius: '50%',
+                          background: MODEL_PALETTE[i % MODEL_PALETTE.length],
+                          flexShrink: 0,
+                        }}
+                      />
+                      <Text strong style={{ fontSize: 13, flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {u.model}
+                      </Text>
+                      <Text type="secondary" style={{ fontSize: 12, flexShrink: 0 }}>
+                        {u.requests} 次
+                      </Text>
+                      <Text
+                        type="secondary"
+                        style={{ fontSize: 12, flexShrink: 0, whiteSpace: 'nowrap' }}
+                        title={`平均时延 ${u.avgLatencyMs} ms`}
+                      >
+                        {u.avgLatencyMs >= 10000
+                          ? `均 ${(u.avgLatencyMs / 1000).toFixed(1)}s`
+                          : `均 ${u.avgLatencyMs}ms`}
+                      </Text>
+                    </div>
+                  ))}
+                </Col>
+              </Row>
+            ) : (
+              <div style={{ textAlign: 'center', paddingTop: 100, color: '#999' }}>
+                暂无模型调用分布记录
+              </div>
+            )}
           </Card>
         </Col>
       </Row>
@@ -402,18 +437,6 @@ export const StatisticsPage: React.FC = () => {
         />
       </Card>
 
-      {/* 模型性能明细 */}
-      {modelUsages.length > 0 && (
-        <Card title="模型性能明细">
-          <Table
-            rowKey="model"
-            columns={modelColumns}
-            dataSource={modelUsages}
-            pagination={false}
-          />
-        </Card>
-      )}
-
       {/* 请求详情弹窗 */}
       <Modal
         title="请求流水详细信息"
@@ -468,7 +491,9 @@ export const StatisticsPage: React.FC = () => {
           </Descriptions>
         )}
       </Modal>
-    </Space>
+      </Space>
+      </div>
+    </div>
   );
 };
 

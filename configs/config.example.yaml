@@ -168,8 +168,8 @@ facade:
   # label 是 /v1/models 里的展示名（可选，不填则不带 name 字段）。
   models:
     # 清单来源：Statsig 动态配置 prism_codex_models（2026-10-01 实测）。
-    # 上游会下线/新增模型（gpt-6-astra 已下线、6.1 Sol 与 6 Luna 新上线），
-    # 维护时以该配置为准，不要凭记忆或旧文档硬编码。
+    # 只保留 4 个现役模型 x 各自的推理档位；已下线模型（astra 系）与
+    # 历史别名一律不再对外暴露 —— 维护时以 Statsig 下发的清单为准。
     #
     # ---- 6.1 Sol（当前旗舰）----
     gpt-6.1-sol:
@@ -188,14 +188,6 @@ facade:
       model: gpt-6.1-sol
       reasoning_effort: xhigh
       label: "6.1 Sol (Extra High)"
-    6.1-sol:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "6.1 Sol (短别名)"
-    gpt-6.1:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "GPT-6.1"
 
     # ---- 6 Luna ----
     gpt-6-luna:
@@ -210,87 +202,38 @@ facade:
       model: gpt-6-luna
       reasoning_effort: xhigh
       label: "6 Luna (Extra High)"
-    6-luna:
-      model: gpt-6-luna
-      reasoning_effort: medium
-      label: "6 Luna (短别名)"
 
     # ---- 5.6 Sol ----
     gpt-5.6-sol:
       model: gpt-5.6-sol
       reasoning_effort: medium
       label: "5.6 Sol"
-    sol:
-      model: gpt-5.6-sol
-      reasoning_effort: medium
-      label: "Sol"
-    sol-low:
+    gpt-5.6-sol-low:
       model: gpt-5.6-sol
       reasoning_effort: low
-      label: "Sol (Low)"
-    sol-high:
+      label: "5.6 Sol (Low)"
+    gpt-5.6-sol-high:
       model: gpt-5.6-sol
       reasoning_effort: high
-      label: "Sol (High)"
-    sol-xhigh:
+      label: "5.6 Sol (High)"
+    gpt-5.6-sol-xhigh:
       model: gpt-5.6-sol
       reasoning_effort: xhigh
-      label: "Sol (Extra High)"
-    gpt-5:
-      model: gpt-5.6-sol
-      reasoning_effort: medium
-      label: "GPT-5（历史别名）"
-    gpt-5-high:
-      model: gpt-5.6-sol
-      reasoning_effort: high
-      label: "GPT-5 (High)"
-    gpt-5-xhigh:
-      model: gpt-5.6-sol
-      reasoning_effort: xhigh
-      label: "GPT-5 (Extra High)"
-    prism-sol:
-      model: gpt-5.6-sol
-      reasoning_effort: medium
-      label: "Prism Sol (Codex)"
+      label: "5.6 Sol (Extra High)"
 
     # ---- 5.6 Terra ----
     gpt-5.6-terra:
       model: gpt-5.6-terra
       reasoning_effort: medium
       label: "5.6 Terra"
-    terra:
-      model: gpt-5.6-terra
-      reasoning_effort: medium
-      label: "Terra"
-    terra-high:
+    gpt-5.6-terra-high:
       model: gpt-5.6-terra
       reasoning_effort: high
-      label: "Terra (High)"
-    terra-xhigh:
+      label: "5.6 Terra (High)"
+    gpt-5.6-terra-xhigh:
       model: gpt-5.6-terra
       reasoning_effort: xhigh
-      label: "Terra (Extra High)"
-
-    # ---- 已下线模型的兼容重定向 ----
-    # gpt-6-astra 于 2026-10 下线：上游把它路由到 codex_v2_restore_start
-    # 并返回 400（无创建入口，见 docs/协议校准报告.md）。
-    # 老名字重定向到当前旗舰，让老客户端无感迁移而不是直接报错。
-    gpt-6-astra:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "GPT-6 Astra（已下线 → 6.1 Sol）"
-    astra:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "Astra（已下线 → 6.1 Sol）"
-    gpt-6:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "GPT-6（已下线 → 6.1 Sol）"
-    prism-astra:
-      model: gpt-6.1-sol
-      reasoning_effort: medium
-      label: "Prism Astra（已下线 → 6.1 Sol）"
+      label: "5.6 Terra (Extra High)"
 
   # -------------------------------------------------------------------------
   # 上游协议字段名映射

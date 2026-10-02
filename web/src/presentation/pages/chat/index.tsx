@@ -1,17 +1,5 @@
-import React, { useEffect, useState } from 'react';
-import {
-  Card,
-  Row,
-  Col,
-  Select,
-  Segmented,
-  Space,
-  Button,
-  Tag,
-  Typography,
-  Divider,
-  Avatar,
-} from 'antd';
+import React, { useEffect, useRef, useState } from 'react';
+import { Avatar, Button, Card, Dropdown, Space, Tag, Typography, Upload, message } from 'antd';
 import {
   RobotOutlined,
   UserOutlined,
@@ -21,16 +9,31 @@ import {
   CodeOutlined,
   FileSearchOutlined,
   PictureOutlined,
+  DownOutlined,
+  CheckOutlined,
+  PaperClipOutlined,
+  CloseOutlined,
 } from '@ant-design/icons';
 import { Bubble, Sender, ThoughtChain, Conversations, Prompts } from '@ant-design/x';
 import type { ReasoningEffort } from '../../../domain/chat/entity';
+import { effortsForModel } from '../../../domain/modelFilter';
 import { useChatStore } from '../../../application/chat/store';
 
 const { Text } = Typography;
 
+/** 推理强度档位的展示名（顺序 = 低/中/高/极高） */
+const EFFORT_LABELS: Record<ReasoningEffort, string> = {
+  low: '低 (Low)',
+  medium: '中 (Medium)',
+  high: '高 (High)',
+  xhigh: '极高 (xHigh)',
+};
+const EFFORT_ORDER: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
 export const ChatPlaygroundPage: React.FC = () => {
   const {
     models,
+    allModelIds,
     sessions,
     currentSessionId,
     selectedModel,
@@ -45,19 +48,47 @@ export const ChatPlaygroundPage: React.FC = () => {
   } = useChatStore();
 
   const [input, setInput] = useState('');
+  const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
+  const msgListRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     init();
   }, [init]);
 
+  // 当前模型的可用推理档位（由后端清单中的档位变体推导，如 6 Luna 没有 low）
+  const availableEfforts = effortsForModel(selectedModel, allModelIds);
+
+  // 消息区自动滚底（流式增量与首屏渲染都跟随）
+  useEffect(() => {
+    const el = msgListRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [sessions, currentSessionId]);
+
   const activeSession = sessions.find((s) => s.id === currentSessionId);
   const messages = activeSession?.messages || [];
+  const currentModel = models.find((m) => m.id === selectedModel);
+  const effortLabel = EFFORT_LABELS[reasoningEffort];
 
   const handleSend = () => {
     if (!input.trim() || isStreaming) return;
     const text = input;
+    const atts = attachments;
     setInput('');
-    sendMessage(text);
+    setAttachments([]);
+    sendMessage(text, atts.length > 0 ? atts : undefined);
+  };
+
+  // 附件：本地读取为 base64 data URL，随消息走 OpenAI image_url 多模态格式
+  const handleAttach = (file: File) => {
+    if (attachments.length >= 4) {
+      message.warning('最多附加 4 张图片');
+      return false;
+    }
+    const reader = new FileReader();
+    reader.onload = () =>
+      setAttachments((prev) => [...prev, { name: file.name, dataUrl: String(reader.result) }]);
+    reader.readAsDataURL(file);
+    return false; // 手动处理，不触发 antd 默认上传
   };
 
   // 推荐提示词项
@@ -100,6 +131,19 @@ export const ChatPlaygroundPage: React.FC = () => {
       ),
       content: (
         <div>
+          {/* 用户消息附带的图片附件（多模态输入回显） */}
+          {m.attachments && m.attachments.length > 0 && (
+            <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: m.content ? 8 : 0 }}>
+              {m.attachments.map((a, i) => (
+                <img
+                  key={i}
+                  src={a.dataUrl}
+                  alt={a.name}
+                  style={{ maxWidth: 200, maxHeight: 150, borderRadius: 8, border: '1px solid #eee', objectFit: 'cover' }}
+                />
+              ))}
+            </div>
+          )}
           {/* 若包含思考链，使用 @ant-design/x 的 ThoughtChain 组件呈现 */}
           {m.reasoning && (
             <div style={{ marginBottom: 8 }}>
@@ -127,41 +171,50 @@ export const ChatPlaygroundPage: React.FC = () => {
     };
   });
 
+  // 模型切换下拉（清单来自后端 /v1/models，无前端硬编码）
+  const modelMenu = {
+    items: models.map((m) => ({
+      key: m.id,
+      label: (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, minWidth: 160 }}>
+          <span>{m.name}</span>
+          {m.id === selectedModel && <CheckOutlined style={{ color: '#1677ff' }} />}
+        </div>
+      ),
+    })),
+    selectedKeys: [selectedModel],
+    onClick: ({ key }: { key: string }) => setModel(key),
+  };
+
+  // 推理强度下拉（选项随模型动态变化：各模型的档位由后端配置决定）
+  const effortMenu = {
+    items: EFFORT_ORDER.filter((e) => availableEfforts.includes(e)).map((e) => ({
+      key: e,
+      label: (
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 16, minWidth: 120 }}>
+          <span>{EFFORT_LABELS[e]}</span>
+          {e === reasoningEffort && <CheckOutlined style={{ color: '#1677ff' }} />}
+        </div>
+      ),
+    })),
+    selectedKeys: [reasoningEffort],
+    onClick: ({ key }: { key: string }) => setReasoningEffort(key as ReasoningEffort),
+  };
+
   return (
     <Card
-      styles={{ body: { padding: 0 } }}
+      styles={{
+        // 卡片撑满 Content 容器；body 为纵向 flex：会话区撑满、输入区贴底
+        body: { padding: 0, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
+      }}
+      style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
       title={
-        <Space wrap>
-          <RobotOutlined style={{ color: '#1677ff' }} />
-          <span style={{ fontWeight: 600 }}>Codex AI 模型调试控制台</span>
+        <Space size="middle">
+          <Space size="small">
+            <RobotOutlined style={{ color: '#1677ff' }} />
+            <span style={{ fontWeight: 600 }}>Codex AI 模型调试控制台</span>
+          </Space>
           <Tag color="cyan">SQLite 持久化</Tag>
-          <Divider type="vertical" />
-          <Text type="secondary" style={{ fontSize: 13 }}>调试模型:</Text>
-          <Select
-            value={selectedModel}
-            onChange={setModel}
-            style={{ width: 220 }}
-            options={models.map((m) => ({
-              value: m.id,
-              label: (
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                  <span>{m.name}</span>
-                  {m.id === 'gpt-6.1-sol' && <Tag color="red" style={{ marginLeft: 6 }}>旗舰</Tag>}
-                </div>
-              ),
-            }))}
-          />
-          <Text type="secondary" style={{ fontSize: 13 }}>推理强度:</Text>
-          <Segmented
-            value={reasoningEffort}
-            onChange={(val) => setReasoningEffort(val as ReasoningEffort)}
-            options={[
-              { label: '低 (Low)', value: 'low' },
-              { label: '中 (Medium)', value: 'medium' },
-              { label: '高 (High)', value: 'high' },
-              { label: '极高 (xHigh)', value: 'xhigh' },
-            ]}
-          />
         </Space>
       }
       extra={
@@ -170,9 +223,18 @@ export const ChatPlaygroundPage: React.FC = () => {
         </Button>
       }
     >
-      <Row style={{ height: '72vh' }}>
+      <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
         {/* 左侧会话抽屉列表（使用官方 Conversations 组件） */}
-        <Col xs={0} sm={7} md={6} lg={5} style={{ borderRight: '1px solid #f0f0f0', padding: 12, overflowY: 'auto', background: '#fafafa' }}>
+        <div
+          style={{
+            width: 240,
+            flexShrink: 0,
+            borderRight: '1px solid #f0f0f0',
+            padding: 12,
+            overflowY: 'auto',
+            background: '#fafafa',
+          }}
+        >
           <div style={{ marginBottom: 12, fontWeight: 600, color: '#555', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
             <span><BulbOutlined /> 调试会话列表</span>
             <Text type="secondary" style={{ fontSize: 12 }}>共 {sessions.length} 个</Text>
@@ -182,18 +244,18 @@ export const ChatPlaygroundPage: React.FC = () => {
             activeKey={currentSessionId || undefined}
             onActiveChange={(key) => selectSession(key)}
           />
-        </Col>
+        </div>
 
-        {/* 右侧对话主体区（使用官方 Bubble.List + Sender + Prompts 组件） */}
-        <Col xs={24} sm={17} md={18} lg={19} style={{ display: 'flex', flexDirection: 'column', height: '100%', background: '#fff' }}>
-          {/* 消息展示区 */}
-          <div style={{ flex: 1, padding: 20, overflowY: 'auto' }}>
+        {/* 右侧对话主体区（官方 Bubble.List + Sender） */}
+        <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', background: '#fff' }}>
+          {/* 消息展示区：撑满剩余高度、内部滚动、自动跟随到底 */}
+          <div ref={msgListRef} style={{ flex: 1, minHeight: 0, padding: 20, overflowY: 'auto' }}>
             {messages.length === 0 ? (
-              <div style={{ textAlign: 'center', marginTop: 80 }}>
+              <div style={{ textAlign: 'center', marginTop: 60 }}>
                 <RobotOutlined style={{ fontSize: 48, color: '#1677ff' }} />
                 <h3 style={{ marginTop: 16 }}>欢迎体验 OAIprism 交互式调试终端</h3>
                 <p style={{ color: '#888', maxWidth: 500, margin: '0 auto' }}>
-                  直连上游 Prism 代理，支持 6.1 Sol / Luna / Terra 全系模型、工具调用落盘测试与滑动窗口压缩。
+                  直连上游 Prism 代理，模型清单实时来自后端 /v1/models，支持工具调用落盘测试、多模态图片输入与滑动窗口压缩。
                 </p>
                 <div style={{ marginTop: 24, display: 'inline-block', textAlign: 'left' }}>
                   <Prompts
@@ -212,33 +274,59 @@ export const ChatPlaygroundPage: React.FC = () => {
             )}
           </div>
 
-          {/* 快捷 Prompts 推荐 */}
-          {messages.length > 0 && (
-            <div style={{ padding: '0 20px 8px' }}>
-              <Prompts
-                items={promptItems}
-                onItemClick={(item) => {
-                  if (item.data?.description) {
-                    setInput(String(item.data.description));
-                  }
-                }}
-              />
-            </div>
-          )}
-
-          {/* 底部输入框（使用官方 Sender 组件） */}
-          <div style={{ padding: '12px 20px 20px', borderTop: '1px solid #f0f0f0', background: '#fff' }}>
+          {/* 底部输入框（官方 Sender）：模型/强度切换与附件按钮都在输入框内，ChatGPT 式交互 */}
+          <div style={{ padding: '12px 20px 16px', borderTop: '1px solid #f0f0f0', background: '#fff' }}>
             <Sender
               value={input}
               onChange={setInput}
               onSubmit={handleSend}
               loading={isStreaming}
               placeholder="输入调试指令，例如：生成一个鹈鹕骑自行车的 SVG，用 HTML 实现..."
-              prefix={<ThunderboltOutlined style={{ color: '#1677ff' }} />}
+              header={
+                attachments.length > 0 ? (
+                  <div style={{ padding: '10px 12px 0', display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+                    {attachments.map((a, i) => (
+                      <div key={i} style={{ position: 'relative' }}>
+                        <img
+                          src={a.dataUrl}
+                          alt={a.name}
+                          style={{ width: 56, height: 56, objectFit: 'cover', borderRadius: 8, border: '1px solid #eee', display: 'block' }}
+                        />
+                        <Button
+                          size="small"
+                          shape="circle"
+                          icon={<CloseOutlined style={{ fontSize: 10 }} />}
+                          style={{ position: 'absolute', top: -6, right: -6, width: 18, height: 18, minWidth: 18 }}
+                          onClick={() => setAttachments((prev) => prev.filter((_, j) => j !== i))}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                ) : undefined
+              }
+              prefix={
+                <Space size={2} wrap>
+                  <Dropdown menu={modelMenu} trigger={['click']} placement="topLeft">
+                    <Button type="text" shape="round" icon={<RobotOutlined style={{ color: '#1677ff' }} />}>
+                      {currentModel?.name || selectedModel}
+                      <DownOutlined style={{ fontSize: 10, color: '#999' }} />
+                    </Button>
+                  </Dropdown>
+                  <Dropdown menu={effortMenu} trigger={['click']} placement="topLeft">
+                    <Button type="text" shape="round" icon={<ThunderboltOutlined style={{ color: '#faad14' }} />}>
+                      {effortLabel}
+                      <DownOutlined style={{ fontSize: 10, color: '#999' }} />
+                    </Button>
+                  </Dropdown>
+                  <Upload accept="image/*" showUploadList={false} beforeUpload={handleAttach}>
+                    <Button type="text" shape="round" icon={<PaperClipOutlined style={{ color: '#1677ff' }} />} title="附加图片（多模态输入）" />
+                  </Upload>
+                </Space>
+              }
             />
           </div>
-        </Col>
-      </Row>
+        </div>
+      </div>
     </Card>
   );
 };
