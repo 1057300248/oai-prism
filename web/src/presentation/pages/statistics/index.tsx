@@ -481,10 +481,17 @@ export const StatisticsPage: React.FC = () => {
               <Text code copyable>{selectedLog.id}</Text>
             </Descriptions.Item>
             <Descriptions.Item label="请求时间">
-              {selectedLog.timestamp}
+              <Text style={{ whiteSpace: 'nowrap' }}>
+                {selectedLog.timestamp ? new Date(selectedLog.timestamp).toLocaleString('zh-CN', { hour12: false }) : '-'}
+              </Text>
             </Descriptions.Item>
             <Descriptions.Item label="请求方法与路径">
-              <Tag color="blue">{selectedLog.method}</Tag> {selectedLog.path}
+              <Space size={6} style={{ maxWidth: '100%' }}>
+                <Tag color="blue" style={{ flexShrink: 0 }}>{selectedLog.method}</Tag>
+                <span style={{ fontFamily: 'monospace', fontSize: 12, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {selectedLog.path}
+                </span>
+              </Space>
             </Descriptions.Item>
             <Descriptions.Item label="命中模型">
               <Tag color="volcano">{selectedLog.model || '-'}</Tag>
@@ -504,9 +511,20 @@ export const StatisticsPage: React.FC = () => {
               {selectedLog.clientIp || '127.0.0.1'}
             </Descriptions.Item>
             <Descriptions.Item label="User-Agent" span={2}>
-              <Text style={{ fontSize: 12, color: '#666' }}>
-                {selectedLog.userAgent || '-'}
-              </Text>
+              <Tooltip title={selectedLog.userAgent || '-'}>
+                <Text
+                  style={{
+                    fontSize: 12,
+                    color: '#666',
+                    display: 'block',
+                    overflow: 'hidden',
+                    textOverflow: 'ellipsis',
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {selectedLog.userAgent || '-'}
+                </Text>
+              </Tooltip>
             </Descriptions.Item>
             {selectedLog.errorMessage && (
               <Descriptions.Item label="异常错误摘要" span={2}>

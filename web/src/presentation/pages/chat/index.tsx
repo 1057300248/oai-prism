@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Avatar, Button, Card, Dropdown, Input, List, Modal, Popconfirm, Space, Typography, Upload, message } from 'antd';
 import {
   RobotOutlined,
@@ -15,6 +15,7 @@ import {
   CloseOutlined,
   EditOutlined,
   DeleteOutlined,
+  LinkOutlined,
 } from '@ant-design/icons';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -34,6 +35,40 @@ const EFFORT_LABELS: Record<ReasoningEffort, string> = {
   xhigh: '极高 (xHigh)',
 };
 const EFFORT_ORDER: ReasoningEffort[] = ['low', 'medium', 'high', 'xhigh'];
+
+
+/** HTML/SVG 代码块的渲染预览：iframe 直出 + 源码切换 + 新窗口打开 */
+const HtmlPreview: React.FC<{ code: string; lang: string }> = ({ code, lang }) => {
+  const [showSource, setShowSource] = useState(false);
+  const blobUrl = useMemo(() => URL.createObjectURL(new Blob([code], { type: 'text/html' })), [code]);
+  useEffect(() => () => URL.revokeObjectURL(blobUrl), [blobUrl]);
+
+  return (
+    <div style={{ border: '1px solid #e5e7eb', borderRadius: 8, overflow: 'hidden', margin: '8px 0', background: '#fff' }}>
+      <div style={{ background: '#f6f8fa', padding: '4px 10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', borderBottom: '1px solid #e5e7eb' }}>
+        <span style={{ fontSize: 12, color: '#666' }}>{lang === 'svg' ? 'SVG 渲染预览' : 'HTML 渲染预览'}</span>
+        <Space size={0}>
+          <Button type="text" size="small" onClick={() => setShowSource(!showSource)}>
+            {showSource ? '渲染结果' : '查看源码'}
+          </Button>
+          <Button type="text" size="small" icon={<LinkOutlined />} onClick={() => window.open(blobUrl, '_blank')} title="在新窗口打开" />
+        </Space>
+      </div>
+      {showSource ? (
+        <pre style={{ background: '#f6f8fa', margin: 0, padding: '10px 12px', overflowX: 'auto', fontSize: 12 }}>
+          <code>{code}</code>
+        </pre>
+      ) : (
+        <iframe
+          srcDoc={code}
+          title="html-preview"
+          sandbox="allow-scripts"
+          style={{ width: '100%', height: 340, border: 'none', background: '#fff', display: 'block' }}
+        />
+      )}
+    </div>
+  );
+};
 
 export const ChatPlaygroundPage: React.FC = () => {
   const {
@@ -177,7 +212,23 @@ export const ChatPlaygroundPage: React.FC = () => {
           ) : (
             <div className="md-body">
               {m.content ? (
-                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeRaw]}
+                  components={{
+                    // html/svg 代码块 → 渲染预览（iframe 直出），其余走默认
+                    pre: ({ children }: any) => {
+                      const child: any = Array.isArray(children) ? children[0] : children;
+                      const cls: string = child?.props?.className || '';
+                      const lang = (/language-(\w+)/.exec(cls)?.[1] || '').toLowerCase();
+                      const raw = String(child?.props?.children ?? '').replace(/\n$/, '');
+                      if ((lang === 'html' || lang === 'svg') && raw) {
+                        return <HtmlPreview code={raw} lang={lang} />;
+                      }
+                      return <pre>{children}</pre>;
+                    },
+                  }}
+                >
                   {m.content}
                 </ReactMarkdown>
               ) : m.status === 'loading' ? (
