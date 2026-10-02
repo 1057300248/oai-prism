@@ -5,15 +5,19 @@ package server
 //
 // 流程（与 Codex CLI / sub2api 的实现一致）：
 //   1. POST /admin/oauth/begin        生成 PKCE（hex verifier + S256 challenge）
-//                                     与 authorize URL，若回调地址是本地端口
-//                                     则临时起一个回调监听器
+//                                     与 authorize URL，确保本地回调监听器就绪
 //   2. 用户浏览器打开 authorize_url 登录授权 → 跳回 redirect_uri?code=...
-//   3. 回调自动换 token 入库（监听器模式），
+//   3. 回调按 state 反查会话 → 换 token 入库（监听器模式），
 //      或 POST /admin/oauth/exchange 手动粘贴回调地址（兜底模式）
 //   4. GET  /admin/oauth/status       前端轮询导入进度
 //
-// client_id 默认取凭据配置的 OAuthClientID（与 refresh 流程同一 client，
-// 换出的 token 与既有账号同体系）；构造参数可由 begin 请求覆盖。
+// 关键设计：回调监听器是**单例**（端口只监听一次），回调按 state 反查会话 ——
+// 用户多次点击"打开授权页"会产生多个并发会话，若监听器绑定单一会话，
+// 后完成的会话会被先前的会话错误校验（state 不匹配）。
+//
+// 品牌与体系：导入固定用 Prism 的 client（app_jqKb52JverFFcl5GP4axT8QY）——
+// 授权页显示 Prism，且换出的 refresh_token 与该 client 绑定，
+// 账号上记录 oauth_client_id，刷新时逐账号使用，避免全局混用。
 
 import (
 	"crypto/rand"
@@ -38,6 +42,9 @@ const (
 	oauthTokenURL     = "https://auth.openai.com/oauth/token"
 	oauthScope        = "openid profile email offline_access"
 	oauthSessionTTL   = 30 * time.Minute
+	// 官方授权页的品牌与回调白名单都属于 Prism 的 client；
+	// Codex CLI 的 client 品牌是 Codex/ChatGPT，不是本产品。
+	oauthImportClientID = "app_jqKb52JverFFcl5GP4axT8QY"
 )
 
 // oauthSession 一次授权流程的全部状态。
@@ -49,41 +56,62 @@ type oauthSession struct {
 	ClientID     string
 	CreatedAt    time.Time
 
-	mu       sync.Mutex
-	done     bool      // 已拿到 code 并完成（或失败）
-	account  string    // 成功时：入库的账号 ID
-	errMsg   string    // 失败时：错误描述
-	listener net.Listener
+	done    bool   // 已拿到 code 并完成（或失败）
+	account string // 成功时：入库的账号 ID
+	errMsg  string // 失败时：错误描述
 }
 
 // oauthSessionStore 管理进行中的授权会话（内存态，进程生命周期一致）。
+// 主键两种：state（回调反查）与 session_id（前端轮询/手动兜底）。
 type oauthSessionStore struct {
 	mu       sync.Mutex
-	sessions map[string]*oauthSession
+	byState  map[string]*oauthSession
+	byID     map[string]*oauthSession
 }
 
-var oauthSessions = &oauthSessionStore{sessions: map[string]*oauthSession{}}
+var oauthSessions = &oauthSessionStore{
+	byState: map[string]*oauthSession{},
+	byID:    map[string]*oauthSession{},
+}
 
 func (s *oauthSessionStore) put(sess *oauthSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	// 顺手清掉过期会话
-	for id, old := range s.sessions {
+	for k, old := range s.byState {
 		if time.Since(old.CreatedAt) > oauthSessionTTL {
-			delete(s.sessions, id)
+			delete(s.byState, k)
+			delete(s.byID, old.ID)
 		}
 	}
-	s.sessions[sess.ID] = sess
+	s.byState[sess.State] = sess
+	s.byID[sess.ID] = sess
 }
 
-func (s *oauthSessionStore) get(id string) *oauthSession {
+func (s *oauthSessionStore) getByState(state string) *oauthSession {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.sessions[id]
+	sess, ok := s.byState[state]
 	if !ok || time.Since(sess.CreatedAt) > oauthSessionTTL {
 		return nil
 	}
 	return sess
+}
+
+func (s *oauthSessionStore) getByID(id string) *oauthSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sess, ok := s.byID[id]
+	if !ok || time.Since(sess.CreatedAt) > oauthSessionTTL {
+		return nil
+	}
+	return sess
+}
+
+func (s *oauthSessionStore) remove(sess *oauthSession) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.byState, sess.State)
+	delete(s.byID, sess.ID)
 }
 
 // ---- PKCE（OpenAI 特有：verifier 用 hex 编码，challenge 走标准 S256）----
@@ -199,6 +227,52 @@ func oauthEmailFromIDToken(idToken string) string {
 	return claims.Email
 }
 
+// ---- 单例回调监听器：按 state 反查会话 ----
+
+var (
+	oauthCallbackOnce sync.Once
+	oauthCallbackErr  error
+)
+
+// ensureOAuthCallbackListener 启动全局唯一的本地回调监听器（1455）。
+// 端口被占（Codex CLI 在跑等）时返回错误，调用方降级为"网关自身回调路由"。
+func (s *Server) ensureOAuthCallbackListener() (string, error) {
+	oauthCallbackOnce.Do(func() {
+		ln, err := net.Listen("tcp", "127.0.0.1:1455")
+		if err != nil {
+			oauthCallbackErr = err
+			return
+		}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			state := r.URL.Query().Get("state")
+			sess := oauthSessions.getByState(state)
+			if sess == nil {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				_, _ = w.Write([]byte(oauthResultHTML("state 校验失败",
+					"回调的 state 没有匹配到进行中的授权会话（可能已过期，或打开的是旧的授权页）。请回到控制台重新发起授权。")))
+				return
+			}
+			s.handleLocalCallback(w, r, sess)
+		})
+		srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+		go func() { _ = srv.Serve(ln) }()
+	})
+	if oauthCallbackErr != nil {
+		return "", oauthCallbackErr
+	}
+	return "http://localhost:1455/auth/callback", nil
+}
+
+// writeOAuthJSON 输出管理端 JSON 结果。
+func writeOAuthJSON(w http.ResponseWriter, out map[string]any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(out)
+}
+
+// boolPtr 返回 bool 指针（AccountConfig.Enabled 需要）。
+func boolPtr(v bool) *bool { return &v }
+
 // ---- HTTP 处理器 ----
 
 // handleOAuthBegin 创建授权会话并返回 authorize URL。
@@ -209,16 +283,18 @@ func (s *Server) handleOAuthBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<16)).Decode(&body)
 
-	redirectURI := strings.TrimSpace(body.RedirectURI)
-	if redirectURI == "" {
-		redirectURI = "http://localhost:1455/auth/callback"
-	}
 	clientID := strings.TrimSpace(body.ClientID)
 	if clientID == "" {
-		clientID = s.cfg.Creds.OAuthClientID
+		clientID = oauthImportClientID
 	}
-	if clientID == "" {
-		clientID = config.DefaultOAuthClientID
+
+	// 本地回调监听器（单例）；端口被占则降级为网关自身的回调路由。
+	redirectURI, err := s.ensureOAuthCallbackListener()
+	if err != nil {
+		redirectURI = "http://localhost:" + s.gwPort + "/admin/oauth/callback"
+	}
+	if u := strings.TrimSpace(body.RedirectURI); u != "" {
+		redirectURI = u
 	}
 
 	verifier, challenge, err := oauthGeneratePKCE()
@@ -235,47 +311,17 @@ func (s *Server) handleOAuthBegin(w http.ResponseWriter, r *http.Request) {
 		ClientID:     clientID,
 		CreatedAt:    time.Now(),
 	}
-
-	// 回调地址若是本地端口：起临时监听器自动接 code（Codex CLI 同款体验）。
-	if u, err := url.Parse(redirectURI); err == nil {
-		if host := u.Hostname(); host == "localhost" || host == "127.0.0.1" {
-			if ln, lerr := net.Listen("tcp", u.Host); lerr == nil {
-				sess.listener = ln
-				mux := http.NewServeMux()
-				mux.HandleFunc("/", func(w http.ResponseWriter, rr *http.Request) {
-					s.handleLocalCallback(w, rr, sess)
-				})
-				srv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-				go func() {
-					_ = srv.Serve(ln)
-				}()
-				go func() {
-					// 会话过期后关闭监听器
-					<-time.After(oauthSessionTTL)
-					sess.mu.Lock()
-					closed := sess.done
-					sess.mu.Unlock()
-					if !closed {
-						_ = srv.Close()
-					}
-				}()
-				_ = srv
-			}
-			// 端口被占（比如 Codex CLI 已在监听 1455）不报错：
-			// 用户可走手动粘贴兜底。
-		}
-	}
-
 	oauthSessions.put(sess)
+
 	writeOAuthJSON(w, map[string]any{
-		"session_id":   sess.ID,
+		"session_id":    sess.ID,
 		"authorize_url": oauthBuildAuthorizeURL(clientID, redirectURI, state, challenge),
 		"redirect_uri":  redirectURI,
 		"client_id":     clientID,
 	})
 }
 
-// handleLocalCallback 本地回调监听器：接 code → 换 token → 入库 → 输出结果页。
+// handleLocalCallback 处理回调：接 code → 换 token → 入库 → 输出结果页。
 func (s *Server) handleLocalCallback(w http.ResponseWriter, r *http.Request, sess *oauthSession) {
 	q := r.URL.Query()
 	if e := q.Get("error"); e != "" {
@@ -289,12 +335,6 @@ func (s *Server) handleLocalCallback(w http.ResponseWriter, r *http.Request, ses
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
-	if st := q.Get("state"); st != "" && st != sess.State {
-		s.finishOAuthSession(sess, "", fmt.Errorf("state 不匹配，疑似伪造回调"))
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(oauthResultHTML("state 校验失败", "回调的 state 与会话不一致")))
-		return
-	}
 
 	acctID, err := s.completeOAuthLogin(sess, code)
 	if err != nil {
@@ -306,18 +346,14 @@ func (s *Server) handleLocalCallback(w http.ResponseWriter, r *http.Request, ses
 	_, _ = w.Write([]byte(oauthResultHTML("授权成功", "账号 "+acctID+" 已入库并进入调度池，可关闭此页回到控制台查看。")))
 }
 
-// finishOAuthSession 记录会话终态并关闭本地监听器。
+// finishOAuthSession 记录会话终态并从反查表移除。
 func (s *Server) finishOAuthSession(sess *oauthSession, accountID string, err error) {
-	sess.mu.Lock()
 	sess.done = true
 	sess.account = accountID
 	if err != nil {
 		sess.errMsg = err.Error()
 	}
-	if sess.listener != nil {
-		_ = sess.listener.Close()
-	}
-	sess.mu.Unlock()
+	oauthSessions.remove(sess)
 }
 
 // completeOAuthLogin 换 token 并把账号写入 SQLite、热重载进池。
@@ -345,6 +381,9 @@ func (s *Server) completeOAuthLogin(sess *oauthSession, code string) (string, er
 		Email:        email,
 		Plan:         "pro",
 		Tags:         []string{"oauth"},
+		// refresh_token 与签发它的 client 绑定：导入用的哪个 client，
+		// 这个账号的刷新也必须用哪个 —— 逐账号记录，避免全局混用。
+		Headers: map[string]string{"oauth_client_id": sess.ClientID},
 	}
 	if email != "" {
 		acct.Name = email
@@ -362,14 +401,16 @@ func (s *Server) completeOAuthLogin(sess *oauthSession, code string) (string, er
 
 // handleOAuthStatus 前端轮询导入进度。
 func (s *Server) handleOAuthStatus(w http.ResponseWriter, r *http.Request) {
-	sess := oauthSessions.get(strings.TrimSpace(r.URL.Query().Get("session_id")))
+	sess := oauthSessions.getByState(strings.TrimSpace(r.URL.Query().Get("state")))
+	if sess == nil {
+		// 兼容前端只拿 session_id 轮询的用法
+		sess = oauthSessions.getByID(strings.TrimSpace(r.URL.Query().Get("session_id")))
+	}
 	if sess == nil {
 		writeAdminErr(w, http.StatusNotFound, "会话不存在或已过期")
 		return
 	}
-	sess.mu.Lock()
-	defer sess.mu.Unlock()
-	out := map[string]any{"status": "waiting"}
+	out := map[string]any{"status": "waiting", "session_id": sess.ID}
 	if sess.done {
 		if sess.errMsg != "" {
 			out["status"] = "error"
@@ -392,14 +433,13 @@ func (s *Server) handleOAuthExchange(w http.ResponseWriter, r *http.Request) {
 		writeAdminErr(w, http.StatusBadRequest, "解析请求失败: "+err.Error())
 		return
 	}
-	sess := oauthSessions.get(strings.TrimSpace(body.SessionID))
+	sess := oauthSessions.getByID(strings.TrimSpace(body.SessionID))
 	if sess == nil {
 		writeAdminErr(w, http.StatusNotFound, "会话不存在或已过期")
 		return
 	}
 
 	code := strings.TrimSpace(body.Callback)
-	// 支持粘整个 URL：从 query 里抠 code
 	if u, err := url.Parse(code); err == nil && u.Query().Get("code") != "" {
 		if st := u.Query().Get("state"); st != "" && st != sess.State {
 			writeAdminErr(w, http.StatusBadRequest, "state 不匹配，请粘贴本次授权的回调地址")
@@ -427,13 +467,3 @@ func oauthResultHTML(title, detail string) string {
 		"<div style='text-align:center'><h2>" + title + "</h2><p style='color:#666'>" + detail + "</p>" +
 		"<p style='color:#aaa;font-size:13px'>完成后可关闭此页，回到 OAIprism 控制台。</p></div></body>"
 }
-
-
-// writeOAuthJSON 输出管理端 JSON 结果。
-func writeOAuthJSON(w http.ResponseWriter, out map[string]any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(out)
-}
-
-// boolPtr 返回 bool 指针（AccountConfig.Enabled 需要）。
-func boolPtr(v bool) *bool { return &v }

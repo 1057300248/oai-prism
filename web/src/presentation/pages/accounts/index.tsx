@@ -102,15 +102,14 @@ export const AccountsPage: React.FC = () => {
       key: 'name',
       width: 220,
       render: (text, record) => (
-        <div>
-          <Space orientation="horizontal" size="small">
-            <Text strong>{text}</Text>
-            <Tag color={record.source === 'oauth' ? 'purple' : 'default'} style={{ fontSize: 11 }}>
-              {record.source}
-            </Tag>
-          </Space>
-          <div style={{ fontSize: 12, color: '#888', marginTop: 2 }}>{record.id}</div>
-        </div>
+        <Space orientation="horizontal" size="small">
+          <Tooltip title={`账号 ID: ${record.id}`}>
+            <Text strong style={{ cursor: 'default' }}>{text}</Text>
+          </Tooltip>
+          <Tag color={record.source === 'oauth' ? 'purple' : 'default'} style={{ fontSize: 11 }}>
+            {record.source}
+          </Tag>
+        </Space>
       ),
     },
     {

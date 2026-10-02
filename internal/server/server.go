@@ -39,6 +39,7 @@ type Server struct {
 	sqlite *account.SQLiteStore
 	rec    *capture.Recorder
 	srv    *http.Server
+	gwPort string // 网关自身端口（OAuth 回调降级路由用）
 }
 
 // New 组装并返回服务器。
@@ -145,6 +146,11 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		middleware.NewRateLimiter(cfg.Facade.RateLimitPerSecond(), cfg.Facade.RateLimitBurst(), app).Middleware(),
 		middleware.APIKeyAuth(cfg.Facade.APIKeys, app, cfg.Facade.Enabled, cfg.Metrics.Health, cfg.Metrics.Ready, cfg.Metrics.Path),
 	)
+
+	// 网关自身端口：OAuth 导入的回调降级路由（/admin/oauth/callback）需要它
+	if _, port, err := net.SplitHostPort(cfg.Server.Addr()); err == nil {
+		s.gwPort = port
+	}
 
 	s.srv = &http.Server{
 		Addr:              cfg.Server.Addr(),
@@ -329,7 +335,7 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 	// 则走这个路由；指向独立本地端口时由临时监听器接（见 handleOAuthBegin）。
 	mux.HandleFunc("GET /admin/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
 		sessID := r.URL.Query().Get("state")
-		sess := oauthSessions.get(sessID)
+		sess := oauthSessions.getByID(sessID)
 		if sess == nil {
 			writeAdminErr(w, http.StatusBadRequest, "会话不存在或已过期")
 			return
