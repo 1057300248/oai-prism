@@ -423,10 +423,15 @@ func (vm *VM) preload() {
 	})
 	// 6 PROP(n, obj, key)
 	vm.regs[6] = jsFn(func(a ...any) any {
-		vm.logf("  [PROP raw] %v / %v / %v", brief(a[0]), brief(a[1]), brief(a[2]))
-		v := vm.prop(vm.get(a[1]), jsStr(vm.get(a[2])))
+		obj := vm.get(a[1])
+		key := jsStr(vm.get(a[2]))
+		if obj == nil {
+			// Chrome 语义：读 undefined 的属性抛 TypeError（错误串被 ipinfo 槽采集）
+			panic(fmt.Sprintf("TypeError: Cannot read properties of undefined (reading '%s')%s", key, key))
+		}
+		v := vm.prop(obj, key)
 		vm.setReg(a[0], v)
-		vm.logf("PROP reg[%v] = [%v][%q] -> %v", a[0], a[1], jsStr(vm.get(a[2])), brief(v))
+		vm.logf("PROP reg[%v] = [%v][%q] -> %v", a[0], a[1], key, brief(v))
 		return nil
 	})
 	// 7 CALL(fn, args...) —— 解引用后调用，结果丢弃
@@ -881,9 +886,12 @@ func (vm *VM) buildEnv() {
 	oc.set("create", jsFn(func(args ...any) any { return newObj() }))
 	oc.set("keys", jsFn(func(args ...any) any {
 		if o, ok := argOr(args, 0).(*jsObj); ok {
-			out := make([]any, len(o.keys))
-			for i, k := range o.keys {
-				out[i] = k
+			out := make([]any, 0, len(o.keys))
+			for _, k := range o.keys {
+				if isFn(o.props[k]) {
+					continue // 真实 Object.keys 不含原型方法（localStorage 的 setItem 等）
+				}
+				out = append(out, k)
 			}
 			return out
 		}
@@ -907,8 +915,25 @@ func (vm *VM) buildEnv() {
 		return nil
 	}))
 	// 真实条目（Object.keys(localStorage) 是 VM 的采集项！）
+	// 键集直接采用真实模板（env_template.json 的 localstorage 解码值）——
+	// 数量与顺序与真实浏览器一致，这是 39.8 槽字节对齐的关键
+	if tb, err := os.ReadFile(envFile("env_template.json")); err == nil {
+		var tmpl map[string]string
+		if json.Unmarshal(tb, &tmpl) == nil {
+			if lsPlain, ok := tmpl["39.8"]; ok {
+				for _, k := range strings.Split(lsPlain, ",") {
+					k = strings.TrimSpace(k)
+					if k != "" {
+						ls.set(k, "[value]")
+					}
+				}
+			}
+		}
+	}
 	for k, v := range vm.envData.LocalStorage {
-		ls.set(k, v)
+		if ls.get(k) == nil {
+			ls.set(k, v)
+		}
 	}
 	w.set("localStorage", ls)
 
