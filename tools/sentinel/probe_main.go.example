@@ -19,7 +19,7 @@ import (
 	"github.com/bogdanfinn/tls-client/profiles"
 )
 
-const ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+var ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
 	"(KHTML, like Gecko) Chrome/152.0.0.0 Safari/537.36"
 
 func main() {
@@ -42,19 +42,25 @@ func main() {
 	at := pickCookie(cookies, "prism_oai_access_token")
 	fmt.Printf("凭据: access_token %d 字符\n", len(at))
 
-	// ---------- 指纹 config（从真实 token 复刻） ----------
-	bRaw, err := os.ReadFile(`C:\Users\13080\AppData\Local\Temp\sentinel_bundle.json`)
+	// ---------- 指纹 config（从【最新】真实 token 复刻 —— UA/探测项/chunk 必须跟上部署与会话） ----------
+	bRaw, err := os.ReadFile(`C:\Users\13080\AppData\Local\Temp\instrumented_capture.json`)
 	if err != nil {
-		fmt.Println("读 bundle 失败:", err)
+		fmt.Println("读捕获失败:", err)
 		return
 	}
 	var bundle struct {
-		Token  string `json:"token"`
-		Cookie string `json:"cookie"`
+		APIReq *struct {
+			SentinelToken string `json:"sentinelToken"`
+			UA            string `json:"ua"`
+		} `json:"apiReq"`
 	}
 	_ = json.Unmarshal(bRaw, &bundle)
+	if bundle.APIReq == nil || bundle.APIReq.SentinelToken == "" {
+		fmt.Println("捕获无 apiReq.sentinelToken")
+		return
+	}
 	var realTok map[string]string
-	_ = json.Unmarshal([]byte(bundle.Token), &realTok)
+	_ = json.Unmarshal([]byte(bundle.APIReq.SentinelToken), &realTok)
 	core := strings.TrimSuffix(strings.TrimPrefix(realTok["p"], "gAAAAAB"), "~S")
 	cfgRaw, _ := base64.StdEncoding.DecodeString(core + strings.Repeat("=", (4-len(core)%4)%4))
 	var cfg []interface{}
@@ -63,6 +69,7 @@ func main() {
 		return
 	}
 	fmt.Printf("复刻 config %d 元素\n", len(cfg))
+	ua = bundle.APIReq.UA // UA 必须与会话浏览器一致（服务端做会话级 UA 比对）
 
 	// ---------- Chrome_152 指纹客户端 ----------
 	client, err := tls_client.NewHttpClient(tls_client.NewNoopLogger(),
@@ -215,7 +222,7 @@ func main() {
 	// 最终 token：p = 真实难度 enforcement PoW；t = VM 结果；c = 响应 token。
 	tok := fmt.Sprintf(`{"p":%q,"t":%q,"c":%q,"flow":"prism_inference"}`, proof2, vmT, sr.Token)
 	_ = os.WriteFile(`C:\Users\13080\AppData\Local\Temp\final_token.json`, []byte(tok), 0o600)
-	for i := 0; i < 2; i++ {
+	for i := 0; i < 1; i++ {  // single-shot
 		code, body, _ = do(client, "POST", "https://prism.openai.com/api/projects",
 			fmt.Sprintf(`{"project_uuid":%q,"title":"pure-go-%d"}`, newUUID(), i),
 			fullCookie, tok)

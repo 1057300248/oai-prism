@@ -12,11 +12,19 @@
 | requirements PoW（p_req） | ✅ | fnv1a + 25 元 config，服务端接受 |
 | 取 c | ✅ | `POST sentinel.openai.com/backend-api/sentinel/req` |
 | **dx 解密** | ✅ | `JSON.parse(XOR(atob(dx), p_req))` |
-| **dx VM 解释器** | ✅ | 36 opcode 寄存器机器，同挑战执行路径与真实 100% 一致 |
-| **t 内容过风控** | ❌ 未竟 | 结构 95% 对齐，内容级风控仍拒绝（见下）|
+| **dx VM 解释器** | ✅ | 36 opcode 寄存器机器 |
+| **t 生成** | ✅✅✅ | **与真实浏览器逐字节相同**（2026-10-02 12:38 捕获挑战，1628 字符）|
+| 全新挑战变体（86-95 条指令） | 🔶 | 结构全通；变体专属采集项的环境保真度需逐变体校准 |
 
-**决定性消融**：未消费的真实 token + Go 客户端 → **HTTP 200**（项目真实创建）。
-即 Go 的 TLS/h2/头指纹完全够用，token 一次性（重放 403），唯一缺口是自产 t 的内容。
+**决定性消融**（2026-10-02）：
+1. 未消费真实 token + Go tls-client 重放 → **HTTP 200**（环境/传输层完全没问题）
+2. 我的 VM 在捕获挑战上的 t 与真实浏览器 t **逐字节相同**（穷举 K='37.43' 解出真实 accJSON 比对，
+   1221 字符原始串一致、17 字段键序一致）
+3. 组装的 token 字符串与真实 token 逐字节一致
+
+即 t 生成链路 100% 还原。未竟项：**挑战变体在演化**（83→95 条指令、15→17 字段），
+每个变体的采集项组合不同，静态环境桩（env_real.json/env_template.json）对未捕获过的
+变体可能产出错误采集值 → 需"捕获→离线对齐→单发"循环逐变体校准。
 
 ## 完整协议（全部实测还原）
 
@@ -57,12 +65,27 @@ t  = btoa( JSON.stringify(acc) ⊕ key )    # key = 每次运行随机的 "NN.NN
   `Object.keys(localStorage)`（真实站点 9 个条目！）、fontRect 测量（Arial 19px +
   组合字符）、`performance.now` 多点 timing、Reflect.set 累积对象（15-17 字段）
 
-## 实测对齐进度（同挑战 + 随机序列回放）
+## 实测对齐进度（同挑战 + 随机序列回放，2026-10-02 收官）
 
-- 15 字段全部键名一致、执行路径一致（455-480 步 resolved）
-- 9/15 字段字节数完全一致；剩余 6 个为小文本/二进制内容差
-  （timing 值、比值测量 "1.43"、部分集合长度）
-- 我的 t 长度 1360 vs 真实 1548（结构性接近，内容级风控未过）
+- **17/17 字段明文级一致**（零钩子：acc 值本身是 b64，同挑战共享槽密钥 → crib 恢复）
+- **t 与真实浏览器逐字节相同**（crack_real_t3.py 穷举 K 空间解出真实 accJSON 对比）
+- 关键修复（每一条都对应一个静默丢槽/值偏差的根因）：
+  1. **错误传播语义**：callRaw 不得吞 panic —— JS 异常要传到最近 FCALL/ACALL catch
+     （ipinfo 槽 = 9 连读全抛 TypeError，链变量被最后一次 catch 覆盖 + ADD 拼 key）
+  2. **PROP 错误格式**：`Cannot read properties of undefined (reading 'KEY')`，
+     尾部 key 由后续 ADD 拼接，panic 消息不能自带
+  3. **ADD 数值语义**：两个 JSON number → 数值加法（0.7000000000000001+0.1=0.8，
+     字符串拼接会产出 21 字节尾巴）
+  4. **BIND 引用语义**：boundFn.recv 支持字符串/数组接收者；pop/shift 的变异
+     要反映回接收者（版本槽 = split("/").pop().pop() 两次）
+  5. **SCRIPT-FIND 返回全匹配字符串**（不是 str.match 的数组），随后 split('/').pop()
+     得 SDK 版本号
+  6. **document.location 字符串化即 href**（`""+location` = 25 字符 href）
+  7. **localStorage 键集 = env_template 的解码值本身**（追加 envData 键会多 76 字节）；
+     setItem 的新键要出现在 Object.keys 里
+  8. **fontRect 逐捕获校准**（同浏览器不同页面状态测量值不同：17.78/15 vs 34.47/22.5）
+  9. **随机回放偏移**：捕获序列前段是 SDK 层消耗的（PoW 种子等），VM 回放起点 =
+     random_2 槽值在序列中的索引 - 1（verify_pipeline 自动定位）
 
 ## 服务端校验推断
 
@@ -82,12 +105,17 @@ token 一次性，每请求一次），Go 承担全部 API 传输。相比现在
 | 文件 | 说明 |
 |---|---|
 | `vm.go` | dx VM 解释器（36 opcode，随机序列回放、Reflect.set 追踪）|
-| `probe_main.go.example` | 完整纯 Go 链路探针（换发→PoW→req→dx→VM→API）|
+| `probe_main.go.example` | 完整纯 Go 链路探针（换发→PoW→req→dx→VM→API，单发）|
 | `vm_standalone_main.go.example` | 独立 VM 运行器（--trace 全轨迹 + setLog）|
-| `instrumented_cap.js` | 真实浏览器仪器化捕获（钩 JSON.stringify/Math.random）|
-| `fresh_token_cap.js` | 未消费 token 捕获（消融用）|
-| `crack_real_t2.py` | t 内层 XOR 密钥约束求解 |
-| `precision_align.py` | 同挑战累积对象逐字段 diff |
+| `instrumented_cap.js` | 真实浏览器仪器化捕获（JSON.stringify/Math.random/perf.now；API 请求 abort 不消费 token）|
+| `verify_pipeline.py` | 全链路核对：捕获→解密→VM（随机回放+偏移自动定位）→委托 diff |
+| `diff_same_challenge.py` | 同挑战逐槽明文 diff（crib 恢复槽密钥，零钩子依赖）|
+| `diff_plaintext.py` | 双 btoa 日志版逐槽 diff（需浏览器钩 btoa 的捕获）|
+| `crack_real_t3.py` | 穷举真实 token 的 t 密钥 → 解 accJSON → 与我的输出逐字节对比 |
+| `decode_slots.py` | 我方 acc 槽自解码（trace 密钥候选）|
+| `check_token_str.py` | 重组 token 字符串 vs 捕获 token 的逐字节一致性 |
+| `crack_real_t2.py` | （旧）t 内层 XOR 密钥约束求解 |
+| `precision_align.py` | （旧）同挑战累积对象逐字段 diff |
 
-环境数据依赖（运行时同目录）：`env_real.json`（真实浏览器 screen/navigator/
-scripts/windowKeys/localStorage 等，由 harvest 脚本生成）。
+环境数据依赖（运行时同目录）：`env_real.json`（screen/navigator/scripts/windowKeys/
+localStorage/docTitle/fontRect —— 由捕获脚本 harvest；fontRect 需逐捕获更新）。

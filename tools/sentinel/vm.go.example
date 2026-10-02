@@ -16,6 +16,7 @@ import (
 	"math"
 	"math/rand"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -46,7 +47,7 @@ func (o *jsObj) set(k string, v any) {
 type jsFn func(args ...any) any
 
 type boundFn struct {
-	recv *jsObj
+	recv any // 可以是 *jsObj / string / []any（"str".split.bind("str") 合法）
 	name string
 }
 
@@ -56,6 +57,8 @@ type VM struct {
 	regs       map[float64]any
 	done       bool
 	setLog     []string
+	accJSON    string
+	btoaLog    [][2]string
 	result     string // resolve 的值（t = btoa(这个)）
 	isTimeout  bool
 	steps      int
@@ -178,10 +181,29 @@ func jsStr(v any) string {
 		return fmt.Sprintf("%v", x)
 	case *jsObj:
 		return "[object Object]"
+	case []any:
+		// JS String(array) = join(',')：null/undefined 元素贡献空串，嵌套数组递归
+		parts := make([]string, len(x))
+		for i, item := range x {
+			if item == nil {
+				parts[i] = ""
+				continue
+			}
+			parts[i] = jsStr(item)
+		}
+		return strings.Join(parts, ",")
 	case jsFn, *boundFn:
 		return "function"
 	}
 	return fmt.Sprintf("%v", v)
+}
+
+// jsNilWord：Chrome 错误消息里的接收者词（undefined / null）。
+func jsNilWord(v any) string {
+	if v == nil {
+		return "undefined"
+	}
+	return "null"
 }
 
 func jsNum(v any) float64 {
@@ -329,19 +351,43 @@ func jsEq(a, b any) bool {
 }
 
 // callRaw：原样传参调用（对应 dispatcher / sn/un/an 的 raw 语义）。
-func (vm *VM) callRaw(f any, args []any) (r any) {
-	defer func() {
-		if e := recover(); e != nil {
-			r = fmt.Sprint(e)
-		}
-	}()
+// 注意：这里【不能】recover —— JS 语义里异常要一路传播到最近的 try/catch
+// （FCALL/ACALL）或顶层 runner；在此吞掉会让 FCALL 的 catch 永远收不到错误，
+// 累积对象槽位静默丢失（8/15 对齐时的根因）。
+func (vm *VM) callRaw(f any, args []any) any {
 	switch x := f.(type) {
 	case jsFn:
 		return x(args...)
 	case *boundFn:
-		if fn, ok := x.recv.get(x.name).(jsFn); ok {
-			return fn(args...)
+		if fn, ok := vm.methodOf(x.recv, x.name).(jsFn); ok {
+			r := fn(args...)
+			// JS 数组是引用语义：pop/shift 的变异要反映回绑定的接收者。
+			// 版本槽 = split("/").pop().pop() —— 第二次 pop 必须看到缩短后的数组，
+			// 否则两次都返回 "sdk.js" 而非 "20260219f9f6"。
+			if arr, ok := x.recv.([]any); ok {
+				switch x.name {
+				case "pop":
+					if len(arr) > 0 {
+						x.recv = arr[:len(arr)-1]
+					}
+				case "shift":
+					if len(arr) > 0 {
+						x.recv = arr[1:]
+					}
+				}
+			}
+			return r
 		}
+	}
+	return nil
+}
+
+// methodOf：取 recv 上的方法。jsObj 直取属性；string/[]any 走 prop 的方法闭包
+// （真实 JS 里 "str".split.bind("str")、arr.pop.bind(arr) 都合法，BIND 必须支持）。
+func (vm *VM) methodOf(recv any, name string) any {
+	switch recv.(type) {
+	case *jsObj, string, []any:
+		return vm.prop(recv, name)
 	}
 	return nil
 }
@@ -392,6 +438,8 @@ func (vm *VM) preload() {
 			vm.result = jsStr(vm.get(a[0]))
 			if o, ok := vm.get(a[0]).(*jsObj); ok {
 				vm.dumpAcc(o)
+				vm.accJSON = jsJSONStringify(o)
+				_ = os.WriteFile(envFile("acc_mine.json"), []byte(vm.accJSON), 0o600)
 			}
 			vm.logf(">>> RESOLVE %v", brief(vm.result))
 		}
@@ -412,17 +460,35 @@ func (vm *VM) preload() {
 		dst, src := vm.get(a[0]), vm.get(a[1])
 		if arr, ok := dst.([]any); ok {
 			vm.setReg(a[0], append(append([]any{}, arr...), src))
-		} else {
-			vm.setReg(a[0], jsStr(dst)+jsStr(src))
+			return nil
 		}
+		// JS + 语义：两个 number → 数值加法。指令流里 "0.7000000000000001"+0.1
+		// 是 JSON 数字，数值和恰为 0.8（3 字节）；字符串拼接会产生 21 字节的
+		// "0.70000000000000010.1" —— 55.59 槽对齐的关键。
+		df, dok := toFloat(dst)
+		sf, sok := toFloat(src)
+		if dok && sok {
+			vm.setReg(a[0], df+sf)
+			return nil
+		}
+		vm.setReg(a[0], jsStr(dst)+jsStr(src))
 		return nil
 	})
 	// 6 PROP(n, obj, key)
 	vm.regs[6] = jsFn(func(a ...any) any {
-		vm.logf("  [PROP raw] %v / %v / %v", brief(a[0]), brief(a[1]), brief(a[2]))
-		v := vm.prop(vm.get(a[1]), jsStr(vm.get(a[2])))
+		obj := vm.get(a[1])
+		key := jsStr(vm.get(a[2]))
+		if obj == nil {
+			// Chrome 语义：读 undefined 的属性抛 TypeError（错误串被 ipinfo 槽采集）。
+			// 消息格式必须逐字节对齐 Chrome：尾部 key 由后续的 ADD 指令拼接，这里不能带。
+			panic(fmt.Sprintf("TypeError: Cannot read properties of undefined (reading '%s')", key))
+		}
+		if o, ok := obj.(*jsObj); ok && o == nil {
+			panic(fmt.Sprintf("TypeError: Cannot read properties of null (reading '%s')", key))
+		}
+		v := vm.prop(obj, key)
 		vm.setReg(a[0], v)
-		vm.logf("PROP reg[%v] = [%v][%q] -> %v", a[0], a[1], jsStr(vm.get(a[2])), brief(v))
+		vm.logf("PROP reg[%v] = [%v][%q] -> %v", a[0], a[1], key, brief(v))
 		return nil
 	})
 	// 7 CALL(fn, args...) —— 解引用后调用，结果丢弃
@@ -444,6 +510,11 @@ func (vm *VM) preload() {
 	vm.regs[11] = jsFn(func(a ...any) any {
 		pat := jsStr(vm.get(a[1]))
 		m := vm.findScript(pat)
+		// 真实 opcode 11 直接产出全匹配【字符串】（后续 split('/sdk.js')[0].split('/').pop()
+		// 取版本号）。若返回 str.match 的数组，下一步 .split.bind 会踩到数组无 split 方法。
+		if arr, ok := m.([]any); ok && len(arr) > 0 {
+			m = arr[0]
+		}
 		vm.setReg(a[0], m)
 		vm.logf("SCRIPT-FIND reg[%v] /%s/ -> %v", a[0], pat, brief(m))
 		return nil
@@ -483,6 +554,12 @@ func (vm *VM) preload() {
 	vm.regs[15] = jsFn(func(a ...any) any {
 		s := jsJSONStringify(vm.get(a[1]))
 		vm.setReg(a[0], s)
+		// 累积对象序列化点（XOR 前）——按内容特征导出（键形如 N.NN）
+		if strings.HasPrefix(s, "{\"") && len(s) > 200 {
+			if e := os.WriteFile(envFile("acc_mine.json"), []byte(s), 0o600); e != nil {
+				fmt.Fprintln(os.Stderr, "acc 写入失败:", e)
+			}
+		}
 		vm.logf("JSON-STR reg[%v] -> %.100q", a[0], s)
 		return nil
 	})
@@ -513,7 +590,10 @@ func (vm *VM) preload() {
 	})
 	// 19 BTOA(n)
 	vm.regs[19] = jsFn(func(a ...any) any {
-		vm.setReg(a[0], jsBtoa(jsStr(vm.get(a[0]))))
+		in := jsStr(vm.get(a[0]))
+		out := jsBtoa(in)
+		vm.setReg(a[0], out)
+		vm.btoaLog = append(vm.btoaLog, [2]string{in, out})
 		return nil
 	})
 	// 20 EQ-CALL(n, e, fn, args...) —— 原样传参
@@ -557,11 +637,16 @@ func (vm *VM) preload() {
 	})
 	// 24 BIND(n, obj, key)
 	vm.regs[24] = jsFn(func(a ...any) any {
-		if o, ok := vm.get(a[1]).(*jsObj); ok {
-			key := jsStr(vm.get(a[2]))
-			vm.setReg(a[0], &boundFn{recv: o, name: key})
-			vm.logf("BIND reg[%v] = [%s].%s", a[0], brief(o), key)
+		recv := vm.get(a[1])
+		key := jsStr(vm.get(a[2]))
+		// 真实语义：mem[n] = obj[key].bind(obj)。方法不存在时是
+		// `undefined.bind` → 读 'bind' 抛 TypeError（不能静默吞掉——
+		// 桩环境缺口要在这里暴露出来）。
+		if vm.methodOf(recv, key) == nil {
+			panic(fmt.Sprintf("TypeError: Cannot read properties of %s (reading 'bind')", jsNilWord(recv)))
 		}
+		vm.setReg(a[0], &boundFn{recv: recv, name: key})
+		vm.logf("BIND reg[%v] = [%s].%s", a[0], brief(recv), key)
 		return nil
 	})
 	// 25 AWAIT(n, e)
@@ -666,6 +751,15 @@ func (vm *VM) reqKey() string {
 
 func (vm *VM) Run(instrs []any) {
 	vm.regs[9] = instrs
+	// 顶层 runner 的 try/catch：JS 语义里未捕获异常 → resolve("步数: 错误")。
+	// 不能放在 loop() 内层 —— 内层捕获会破坏“传播到最近 FCALL/ACALL”的语义。
+	defer func() {
+		if e := recover(); e != nil {
+			vm.done = true
+			vm.result = fmt.Sprintf("%d: %v", vm.steps, e)
+			fmt.Fprintf(os.Stderr, "[vm] 未捕获异常（第 %d 步）→ 整体 resolve: %v\n", vm.steps, e)
+		}
+	}()
 	vm.loop()
 }
 
@@ -723,6 +817,10 @@ func (vm *VM) prop(obj any, key string) any {
 		case "toString":
 			return jsFn(func(args ...any) any { return o })
 		}
+		// 字符串数字索引：s["0"] → 首字符（真实 JS s[0] 语义）
+		if idx, err := strconv.Atoi(key); err == nil && idx >= 0 && idx < len([]rune(o)) {
+			return string([]rune(o)[idx])
+		}
 		return nil
 	case []any:
 		switch key {
@@ -736,6 +834,19 @@ func (vm *VM) prop(obj any, key string) any {
 				last := o[len(o)-1]
 				return last
 			})
+		case "join":
+			return jsFn(func(args ...any) any {
+				sep := jsStr(argOr(args, 0))
+				parts := make([]string, len(o))
+				for i, item := range o {
+					parts[i] = jsStr(item)
+				}
+				return strings.Join(parts, sep)
+			})
+		}
+		// 数组数字索引：arr["0"] → 元素（split("/sdk.js")[0] 的取值路径）
+		if idx, err := strconv.Atoi(key); err == nil && idx >= 0 && idx < len(o) {
+			return o[idx]
 		}
 		return nil
 	}
@@ -859,9 +970,12 @@ func (vm *VM) buildEnv() {
 	oc.set("create", jsFn(func(args ...any) any { return newObj() }))
 	oc.set("keys", jsFn(func(args ...any) any {
 		if o, ok := argOr(args, 0).(*jsObj); ok {
-			out := make([]any, len(o.keys))
-			for i, k := range o.keys {
-				out[i] = k
+			out := make([]any, 0, len(o.keys))
+			for _, k := range o.keys {
+				if isFn(o.props[k]) {
+					continue // 真实 Object.keys 不含原型方法（localStorage 的 setItem 等）
+				}
+				out = append(out, k)
 			}
 			return out
 		}
@@ -871,11 +985,11 @@ func (vm *VM) buildEnv() {
 
 	ls := newObj()
 	ls.set("setItem", jsFn(func(args ...any) any {
-		if obj, ok := argOr(args, 0).(*jsObj); ok {
-			_ = obj
-		}
-		vm.lsData[jsStr(argOr(args, 0))] = jsStr(argOr(args, 1))
-		vm.logf("localStorage.setItem(%q, %v)", jsStr(argOr(args, 0)), brief(argOr(args, 1)))
+		k := jsStr(argOr(args, 0))
+		vm.lsData[k] = jsStr(argOr(args, 1))
+		// 真实语义：setItem 的新键会出现在 Object.keys(localStorage) 里
+		ls.set(k, "[value]")
+		vm.logf("localStorage.setItem(%q, %v)", k, brief(argOr(args, 1)))
 		return nil
 	}))
 	ls.set("getItem", jsFn(func(args ...any) any {
@@ -885,13 +999,32 @@ func (vm *VM) buildEnv() {
 		return nil
 	}))
 	// 真实条目（Object.keys(localStorage) 是 VM 的采集项！）
-	for k, v := range vm.envData.LocalStorage {
-		ls.set(k, v)
+	// 键集直接采用真实模板（env_template.json 的 localstorage 解码值）——
+	// 数量与顺序与真实浏览器一致，这是 localStorage 槽字节对齐的关键。
+	// 注意：不能追加 envData.LocalStorage —— 那是另一次捕获的键集，
+	// 追加会多出 76 字节尾巴（真实键集 = 模板键集本身）。
+	if tb, err := os.ReadFile(envFile("env_template.json")); err == nil {
+		var tmpl map[string]string
+		if json.Unmarshal(tb, &tmpl) == nil {
+			if lsPlain, ok := tmpl["39.8"]; ok {
+				for _, k := range strings.Split(lsPlain, ",") {
+					k = strings.TrimSpace(k)
+					if k != "" {
+						ls.set(k, "[value]")
+					}
+				}
+			}
+		}
 	}
 	w.set("localStorage", ls)
 
 	doc := newObj()
-	doc.set("body", newObj())
+	// body 必须带 DOM 方法：元素采集器走 body.appendChild(el).bind 链，
+	// 缺方法会在 BIND 抛 TypeError（真实 DOM 有这两个方法）
+	body := newObj()
+	body.set("appendChild", jsFn(func(args ...any) any { return argOr(args, 0) }))
+	body.set("removeChild", jsFn(func(args ...any) any { return argOr(args, 0) }))
+	doc.set("body", body)
 	scripts := make([]any, 0, len(vm.scriptSrcs))
 	for _, src := range vm.scriptSrcs {
 		el := newObj()
@@ -906,6 +1039,10 @@ func (vm *VM) buildEnv() {
 		return newObj()
 	}))
 	doc.set("title", "Prism")
+	// document.location 必须是“字符串化即 href”的值：location 槽 = "" + document.location。
+	// 放普通 jsObj 会得到 "[object Object]"（9→25 字符偏差的根因），故直接存 href 字符串。
+	// 必须在 DocumentKeys 占位填充【之前】设置，否则会被 "[prop]" 覆盖语义。
+	doc.set("location", "https://prism.openai.com/")
 	for _, k := range vm.envData.DocumentKeys {
 		if doc.get(k) == nil {
 			doc.set(k, "[prop]")
@@ -950,27 +1087,43 @@ func (vm *VM) makeProbeDiv() *jsObj {
 	el := newObj()
 	el.set("style", newObj())
 	el.set("innerText", "")
-	rect := newObj()
-	for k, v := range vm.envData.FontRect {
-		rect.set(k, v)
+	// rect 值来自 env_real.json 的 fontRect（本捕获的字体测量），
+	// 键序固定 x,y,width,height,top,right,bottom,left（JSON.stringify 顺序敏感）。
+	// 默认值 = 本次校准捕获的实测值；换会话时更新 env_real.json 即可。
+	fv := func(k string, d float64) float64 {
+		if vm.envData.FontRect != nil {
+			if v, ok := vm.envData.FontRect[k].(float64); ok {
+				return v
+			}
+		}
+		return d
 	}
+	rect := newObj()
+	rect.set("x", fv("x", 0))
+	rect.set("y", fv("y", 1289))
+	rect.set("width", fv("width", 17.78125))
+	rect.set("height", fv("height", 15))
+	rect.set("top", fv("top", 1289))
+	rect.set("right", fv("right", 17.78125))
+	rect.set("bottom", fv("bottom", 1304))
+	rect.set("left", fv("left", 0))
 	el.set("getBoundingClientRect", jsFn(func(args ...any) any { return rect }))
 	el.set("remove", jsFn(func(args ...any) any { return nil }))
 	return el
 }
 
+// ---------- main ----------
 
-// SolveT: run VM to solve t (btoa output).
-func SolveT(instrs []any, trace bool) (t string, steps int, resolved bool) {
-	vm := NewVM(trace)
-	vm.Run(instrs)
-	return jsBtoa(vm.result), vm.steps, vm.done
-}
-
-// envFile/must: path and error helpers required by vm.go.
 func envFile(name string) string {
 	if p := os.Getenv("SENTINEL_ASSETS"); p != "" {
 		return p + string(os.PathSeparator) + name
 	}
-	return "C:" + string(os.PathSeparator) + "Users" + string(os.PathSeparator) + "13080" + string(os.PathSeparator) + "AppData" + string(os.PathSeparator) + "Local" + string(os.PathSeparator) + "Temp" + string(os.PathSeparator) + name
+	return `C:\Users\13080\AppData\Local\Temp\` + name
+}
+
+// SolveT：跑 VM 求解 t（btoa 输出形式）—— 供探针/网关调用的入口。
+func SolveT(instrs []any, trace bool) (t string, steps int, resolved bool) {
+	vm := NewVM(trace)
+	vm.Run(instrs)
+	return jsBtoa(vm.result), vm.steps, vm.done
 }
