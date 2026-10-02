@@ -227,7 +227,7 @@ export const ChatPlaygroundPage: React.FC = () => {
         // 卡片撑满 Content 容器；body 为纵向 flex：会话区撑满、输入区贴底
         body: { padding: 0, flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
       }}
-      style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
+      style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%', background: '#fff' }}
       title={
         <Space size="small">
           <RobotOutlined style={{ color: '#1677ff' }} />
@@ -251,6 +251,7 @@ export const ChatPlaygroundPage: React.FC = () => {
             display: 'flex',
             flexDirection: 'column',
             background: '#fff',
+            minHeight: 0,
           }}
         >
           <div style={{ marginBottom: 12, fontWeight: 600, color: '#555', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -308,13 +309,12 @@ export const ChatPlaygroundPage: React.FC = () => {
                   </Popconfirm>,
                 ]}
               >
-                <List.Item.Meta
-                  title={
-                    <span style={{ fontSize: 13, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {s.title}
-                    </span>
-                  }
-                />
+                {/* 单行强制：flex + minWidth:0 + ellipsis，任何长度都不折行 */}
+                <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
+                  <span style={{ display: 'block', fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                    {s.title}
+                  </span>
+                </div>
               </List.Item>
             )}
           />
