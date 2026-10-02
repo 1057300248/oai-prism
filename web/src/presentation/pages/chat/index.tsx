@@ -400,11 +400,11 @@ export const ChatPlaygroundPage: React.FC = () => {
             )}
           </div>
 
-          {/* 上下文窗口指示：本轮 token 用量（include_usage 收尾帧） */}
+          {/* 上下文窗口指示：本轮 prompt ≈ 当前会话累计上下文占用（网关估算） */}
           {lastUsage && (
             <div style={{ padding: '6px 20px 0', display: 'flex', justifyContent: 'flex-end' }}>
               <Text type="secondary" style={{ fontSize: 11 }}>
-                上下文窗口 · 输入 {lastUsage.promptTokens} + 输出 {lastUsage.completionTokens} = {lastUsage.totalTokens} tokens
+                上下文窗口 ≈ {lastUsage.promptTokens.toLocaleString()} tokens（本轮输出 {lastUsage.completionTokens}）
               </Text>
             </div>
           )}

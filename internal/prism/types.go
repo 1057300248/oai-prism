@@ -290,6 +290,9 @@ type StartResponse struct {
 	// TurnState 是服务端下发的不透明状态对象，轮询时必须原样回传。
 	TurnState json.RawMessage
 
+	// ListenSnapshot 是沙箱 codex 会话状态指针，下一轮 start 回传。
+	ListenSnapshot json.RawMessage
+
 	// Initial 在 start 直接返回 completed 时携带完整结果
 	// （内容已生成完，或者立刻失败了）。
 	Initial *StatusResponse
@@ -326,6 +329,9 @@ type StatusResponse struct {
 	// TurnState 是本轮下发的状态令牌，下一轮原样回传。
 	// 这是整个轮询协议的核心——它就是一个"续令牌"。
 	TurnState json.RawMessage
+
+	// ListenSnapshot 是沙箱 codex 会话状态指针（同上，续接另一半）。
+	ListenSnapshot json.RawMessage
 
 	Text           string
 	Delta          string
@@ -413,6 +419,10 @@ type PrismEnvelope struct {
 	TurnState      json.RawMessage `json:"turn_state"`
 	Usage          *Usage          `json:"usage,omitempty"`
 	Message        string          `json:"message,omitempty"`
+	// ListenSnapshot 是沙箱内 codex 会话的状态指针（codex_session_id /
+	// transcript_cursor 等）。下一轮 start 必须原样回传 —— 多轮续接的
+	// 另一半钥匙（另一半是 previousResponseId）。真实 Web 每轮都带。
+	ListenSnapshot json.RawMessage `json:"codex_listen_snapshot,omitempty"`
 	Response       *struct {
 		Status  string        `json:"status"` // "success", "error"
 		Payload *CodexPayload `json:"payload"`

@@ -304,6 +304,13 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	}
 	result.ProjectID = projectID
 
+	// 调用方身份：真实 Web 每轮都带 metadata.userId
+	//（user-Wx7p... 形态，来自 access_token JWT 的 chatgpt_user_id claim，
+	// playwright 抓包实证）。字段名由 buildStartPayload 的 schema 处理。
+	if req.UserID == "" && acct.Credential().UserID != "" {
+		req.UserID = acct.Credential().UserID
+	}
+
 	// 2) 沙箱：Prism 的 AI 跑在沙箱容器里，start 必须告诉它用哪个沙箱。
 	//
 	// 漏掉这一步的表现极具误导性：start 会立刻返回
@@ -459,6 +466,14 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		}
 		if st.Done {
 			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			// usage 兜底：上游轮询响应从不回 usage（顶层与 payload 均无
+			// 此键，抓包实证）。prompt 按本轮实际发送的 input 估算 ——
+			// 全量折叠模式下它就是"上下文窗口占用"的本体。
+			in := estimateInputTokens(req.Input)
+			out := estimateTokens(result.Text)
+			if result.Usage == nil {
+				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
+			}
 			return result, nil
 		}
 		if len(st.TurnState) > 0 {
@@ -610,6 +625,12 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 				return result, err
 			}
 			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			// usage 兜底（与上方 start 直达完成路径同款）：上游不回 usage。
+			in := estimateInputTokens(req.Input)
+			out := estimateTokens(result.Text)
+			if result.Usage == nil {
+				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
+			}
 			return result, nil
 		}
 	}

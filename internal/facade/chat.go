@@ -345,6 +345,19 @@ func finishReason(res *RunResult) string {
 	return "stop"
 }
 
+// estimateInputTokens 估算一次请求的 prompt token 量：累加全部
+// input 条目（system + 折叠历史 + 本轮消息）的文本。
+// 这就是"上下文窗口用量"的数值来源（上游轮询响应不回 usage）。
+func estimateInputTokens(items []prism.InputItem) int {
+	var sb strings.Builder
+	for _, it := range items {
+		for _, c := range it.Content {
+			sb.WriteString(c.Text)
+		}
+	}
+	return estimateTokens(sb.String())
+}
+
 // estimateTokens 是尽力而为的估算：CJK 约 1 字 1 token，
 // 拉丁文约 4 字符 1 token。只用于上游没给用量时的占位。
 func estimateTokens(s string) int {

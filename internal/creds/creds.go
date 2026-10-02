@@ -291,6 +291,17 @@ func (c *Credential) applyJWT(tok string) {
 		if v, ok := auth.String("chatgpt_plan_type"); ok {
 			c.Plan = v
 		}
+		// chatgpt_user_id（user-Wx7p... 形态）是 Prism start 请求
+		// metadata.userId 的取值来源 —— 真实 Web 每轮都带（playwright
+		// 抓包实证），缺了会导致 conversation 归属异常、续接失效。
+		// 注意 sub 是 "google-oauth2|数字" 形态，不是它。
+		if c.UserID == "" || !strings.HasPrefix(c.UserID, "user-") {
+			if v, ok := auth.String("chatgpt_user_id"); ok {
+				c.UserID = v
+			} else if v, ok := auth.String("user_id"); ok {
+				c.UserID = v
+			}
+		}
 	}
 	if c.Plan == "" {
 		if v, ok := claims.String("chatgpt_plan_type"); ok {

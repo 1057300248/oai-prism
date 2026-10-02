@@ -510,6 +510,7 @@ func (c *Client) StartResponse(ctx context.Context, p Principal, req *StartReque
 		out.RequestID = st.RequestID
 		out.TurnState = st.TurnState
 		out.ConversationID = st.ConversationID
+		out.ListenSnapshot = st.ListenSnapshot
 		out.Status = st.Status
 		out.Initial = st
 		if out.Status == "" {
@@ -764,6 +765,7 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 			RequestID:      env.RequestID,
 			ConversationID: env.ConversationID,
 			TurnState:      env.TurnState,
+			ListenSnapshot: env.ListenSnapshot,
 			Status:         strings.ToLower(strings.TrimSpace(env.Status)),
 			Usage:          env.Usage,
 		}

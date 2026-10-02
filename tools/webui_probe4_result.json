@@ -1,0 +1,11 @@
+{
+ "handles": {
+  "cid": "cdx1_287998c0-5cc6-494f-92ff-d8236c0c3db4",
+  "respId": "resp_mur08c3e_i4fdbz8m"
+ },
+ "result": {
+  "stage": "polled",
+  "status": "completed",
+  "answer": "芒果布丁"
+ }
+}

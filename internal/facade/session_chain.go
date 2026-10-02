@@ -11,9 +11,12 @@ package facade
 //     历史折叠成 [Previous Conversation History] 文本拼进 system
 //     则全部成功 —— 与 translateChatMessages 对客户端多 messages
 //     的处理完全同款。
-//   - conversationId / previousResponseId 真实前端从不发（带不带
-//     都不影响上下文），透传即可，网关不做续接。
-//   - 同 project 二次 start 本身没问题（前提：历史在 system 里）。
+//   - 原生续接协议（同 cid + prev(resp_*) + codex_listen_snapshot +
+//     增量 input，服务端按 conversation 拼历史）已在真实浏览器内
+//     验证可行（tools/webui_probe4_result.json 答对暗号），但 Go
+//     传输层被上游按"无状态会话"处理 —— 需浏览器代发通道
+//     （tools/browser_forward.js，实验件）稳定化后才能启用。
+//     在那之前，本文件的 History 缓存 + 折叠注入是生产路径。
 //
 // 历史注入判据：客户端本轮只发了 user 消息（没带 assistant 历史）
 // 才注入 —— 已带完整历史的客户端由 translateChatMessages 统一折叠。
