@@ -56,6 +56,8 @@ type VM struct {
 	regs       map[float64]any
 	done       bool
 	setLog     []string
+	accJSON    string
+	btoaLog    [][2]string
 	result     string // resolve 的值（t = btoa(这个)）
 	isTimeout  bool
 	steps      int
@@ -392,6 +394,8 @@ func (vm *VM) preload() {
 			vm.result = jsStr(vm.get(a[0]))
 			if o, ok := vm.get(a[0]).(*jsObj); ok {
 				vm.dumpAcc(o)
+				vm.accJSON = jsJSONStringify(o)
+				_ = os.WriteFile(envFile("acc_mine.json"), []byte(vm.accJSON), 0o600)
 			}
 			vm.logf(">>> RESOLVE %v", brief(vm.result))
 		}
@@ -483,6 +487,12 @@ func (vm *VM) preload() {
 	vm.regs[15] = jsFn(func(a ...any) any {
 		s := jsJSONStringify(vm.get(a[1]))
 		vm.setReg(a[0], s)
+		// 累积对象序列化点（XOR 前）——按内容特征导出（键形如 N.NN）
+		if strings.HasPrefix(s, "{\"") && len(s) > 200 {
+			if e := os.WriteFile(envFile("acc_mine.json"), []byte(s), 0o600); e != nil {
+				fmt.Fprintln(os.Stderr, "acc 写入失败:", e)
+			}
+		}
 		vm.logf("JSON-STR reg[%v] -> %.100q", a[0], s)
 		return nil
 	})
@@ -513,7 +523,10 @@ func (vm *VM) preload() {
 	})
 	// 19 BTOA(n)
 	vm.regs[19] = jsFn(func(a ...any) any {
-		vm.setReg(a[0], jsBtoa(jsStr(vm.get(a[0]))))
+		in := jsStr(vm.get(a[0]))
+		out := jsBtoa(in)
+		vm.setReg(a[0], out)
+		vm.btoaLog = append(vm.btoaLog, [2]string{in, out})
 		return nil
 	})
 	// 20 EQ-CALL(n, e, fn, args...) —— 原样传参
@@ -736,6 +749,15 @@ func (vm *VM) prop(obj any, key string) any {
 				last := o[len(o)-1]
 				return last
 			})
+		case "join":
+			return jsFn(func(args ...any) any {
+				sep := jsStr(argOr(args, 0))
+				parts := make([]string, len(o))
+				for i, item := range o {
+					parts[i] = jsStr(item)
+				}
+				return strings.Join(parts, sep)
+			})
 		}
 		return nil
 	}
@@ -951,9 +973,14 @@ func (vm *VM) makeProbeDiv() *jsObj {
 	el.set("style", newObj())
 	el.set("innerText", "")
 	rect := newObj()
-	for k, v := range vm.envData.FontRect {
-		rect.set(k, v)
-	}
+	rect.set("x", 0.0)
+	rect.set("y", 1289.0)
+	rect.set("width", 20.5625)
+	rect.set("height", 15.0)
+	rect.set("top", 1289.0)
+	rect.set("right", 20.5625)
+	rect.set("bottom", 1304.0)
+	rect.set("left", 0.0)
 	el.set("getBoundingClientRect", jsFn(func(args ...any) any { return rect }))
 	el.set("remove", jsFn(func(args ...any) any { return nil }))
 	return el
@@ -999,6 +1026,11 @@ func main() {
 			sb.WriteString("\n")
 		}
 		_ = os.WriteFile(envFile("setlog.txt"), []byte(sb.String()), 0o600)
+		var bb strings.Builder
+		for _, pair := range vm.btoaLog {
+			bb.WriteString(pair[0] + "\t" + pair[1] + "\n")
+		}
+		_ = os.WriteFile(envFile("btoalog.txt"), []byte(bb.String()), 0o600)
 		prev := t
 		if len(prev) > 80 {
 			prev = prev[:80]
