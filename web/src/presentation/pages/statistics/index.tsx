@@ -27,9 +27,17 @@ import {
 import { Area, Pie } from '@ant-design/plots';
 import { stripEffort } from '../../../domain/modelFilter';
 import { useStatisticsStore } from '../../../application/statistics/store';
+import { useAccountStore } from '../../../application/account/store';
 import type { RequestLog } from '../../../domain/statistics/entity';
 
 const { Text } = Typography;
+
+/** 耗时动态格式化：<1s 用 ms，<1min 用秒，更长用分钟 */
+const fmtDuration = (ms: number) => {
+  if (ms < 1000) return `${ms} ms`;
+  if (ms < 60000) return `${(ms / 1000).toFixed(1)} s`;
+  return `${(ms / 60000).toFixed(1)} 分钟`;
+};
 
 export const StatisticsPage: React.FC = () => {
   const {
@@ -48,6 +56,12 @@ export const StatisticsPage: React.FC = () => {
   } = useStatisticsStore();
 
   const [selectedLog, setSelectedLog] = useState<RequestLog | null>(null);
+  const accountNameMap = useAccountStore((st) => st.accountNameMap);
+  useEffect(() => {
+    if (useAccountStore.getState().accounts.length === 0) {
+      useAccountStore.getState().fetchAccounts();
+    }
+  }, []);
   const [modelFilter, setModelFilter] = useState<string>('');
   const [statusFilter, setStatusFilter] = useState<number | undefined>(undefined);
 
@@ -180,8 +194,15 @@ export const StatisticsPage: React.FC = () => {
       title: '处理账号',
       dataIndex: 'accountId',
       key: 'accountId',
-      render: (acc: string) =>
-        acc ? <Tag color="geekblue">{acc}</Tag> : <Text type="secondary">-</Text>,
+      render: (acc: string) => {
+        if (!acc) return <Text type="secondary">-</Text>;
+        const name = accountNameMap.get(acc);
+        return (
+          <Tooltip title={name && name !== acc ? `账号：${name}` : acc}>
+            <Tag color="geekblue" style={{ cursor: 'default' }}>{acc}</Tag>
+          </Tooltip>
+        );
+      },
     },
     {
       title: '状态',
@@ -202,9 +223,9 @@ export const StatisticsPage: React.FC = () => {
       render: (ms: number) => (
         <span style={{
           fontWeight: 600,
-          color: ms > 3000 ? '#ff4d4f' : ms > 1500 ? '#faad14' : '#52c41a'
+          color: ms > 60000 ? '#ff4d4f' : ms > 15000 ? '#faad14' : '#52c41a'
         }}>
-          {ms} ms
+          {fmtDuration(ms)}
         </span>
       ),
     },
@@ -270,9 +291,8 @@ export const StatisticsPage: React.FC = () => {
           <Card hoverable>
             <Statistic
               title="平均处理耗时"
-              value={summary?.avgLatencyMs || 0}
+              value={summary?.avgLatencyMs ? fmtDuration(summary.avgLatencyMs) : '0 ms'}
               prefix={<FieldTimeOutlined style={{ color: '#faad14' }} />}
-              suffix="ms"
             />
             <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
               运行时长: {formatUptime(summary?.uptimeSec)}
@@ -365,9 +385,7 @@ export const StatisticsPage: React.FC = () => {
                         style={{ fontSize: 12, flexShrink: 0, whiteSpace: 'nowrap' }}
                         title={`平均时延 ${u.avgLatencyMs} ms`}
                       >
-                        {u.avgLatencyMs >= 10000
-                          ? `均 ${(u.avgLatencyMs / 1000).toFixed(1)}s`
-                          : `均 ${u.avgLatencyMs}ms`}
+                        {`均 ${fmtDuration(u.avgLatencyMs)}`}
                       </Text>
                     </div>
                   ))}

@@ -102,7 +102,14 @@ export const AccountsPage: React.FC = () => {
       width: 220,
       render: (_, record) => (
         <Space orientation="horizontal" size="small">
-          <Tooltip title={`名称: ${record.name}${record.email ? ' | 邮箱: ' + record.email : ''}`}>
+          <Tooltip
+            title={
+              <div>
+                <div style={{ fontWeight: 600 }}>{record.name}</div>
+                {record.email && <div style={{ fontSize: 12, opacity: 0.85 }}>{record.email}</div>}
+              </div>
+            }
+          >
             <Text strong style={{ cursor: 'default' }}>{record.id}</Text>
           </Tooltip>
           <Tag color={record.source === 'oauth' ? 'purple' : 'default'} style={{ fontSize: 11 }}>

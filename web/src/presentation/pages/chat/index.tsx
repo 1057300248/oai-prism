@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Avatar, Button, Card, Dropdown, Empty, Input, Modal, Pagination, Space, Typography, Upload, message } from 'antd';
+import { Avatar, Button, Card, Dropdown, Input, List, Modal, Popconfirm, Space, Typography, Upload, message } from 'antd';
 import {
   RobotOutlined,
   UserOutlined,
@@ -19,7 +19,7 @@ import {
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import rehypeRaw from 'rehype-raw';
-import { Bubble, Sender, ThoughtChain, Conversations, Prompts } from '@ant-design/x';
+import { Bubble, Sender, ThoughtChain, Prompts } from '@ant-design/x';
 import type { ReasoningEffort } from '../../../domain/chat/entity';
 import { effortsForModel } from '../../../domain/modelFilter';
 import { useChatStore } from '../../../application/chat/store';
@@ -122,27 +122,9 @@ export const ChatPlaygroundPage: React.FC = () => {
     },
   ];
 
-  // 会话列表：标准 CRUD（悬停菜单：重命名/删除）+ 前端分页
+  // 会话列表 dataSource（List 组件自带分页切片）
   const convPageCount = Math.max(1, Math.ceil(sessions.length / convPageSize));
   const safeConvPage = Math.min(convPage, convPageCount);
-  const pagedSessions = sessions.slice((safeConvPage - 1) * convPageSize, safeConvPage * convPageSize);
-  const conversationItems = pagedSessions.map((s) => ({
-    key: s.id,
-    label: s.title,
-    menu: () => ({
-      items: [
-        { key: 'rename', label: '重命名', icon: <EditOutlined /> },
-        { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true },
-      ],
-      onClick: ({ key }: { key: string }) => {
-        if (key === 'delete') {
-          deleteSession(s.id);
-        } else if (key === 'rename') {
-          setRenaming({ id: s.id, title: s.title });
-        }
-      },
-    }),
-  }));
 
   // Bubble 列表转换
   const bubbleItems = messages.map((m) => {
@@ -275,27 +257,61 @@ export const ChatPlaygroundPage: React.FC = () => {
             <span><BulbOutlined /> 会话列表</span>
             <Text type="secondary" style={{ fontSize: 12 }}>共 {sessions.length} 个</Text>
           </div>
-          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
-            {conversationItems.length > 0 ? (
-              <Conversations
-                items={conversationItems}
-                activeKey={currentSessionId || undefined}
-                onActiveChange={(key) => selectSession(key)}
-              />
-            ) : (
-              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无会话" style={{ marginTop: 32 }} />
+          <List
+            size="small"
+            dataSource={sessions}
+            pagination={
+              sessions.length > convPageSize
+                ? { pageSize: convPageSize, size: 'small', current: safeConvPage, total: sessions.length, onChange: (pg) => setConvPage(pg), style: { marginBottom: 0 } }
+                : false
+            }
+            locale={{ emptyText: '暂无会话' }}
+            renderItem={(s) => (
+              <List.Item
+                onClick={() => selectSession(s.id)}
+                style={{
+                  cursor: 'pointer',
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  marginBottom: 2,
+                  background: s.id === currentSessionId ? '#e6f4ff' : 'transparent',
+                }}
+                actions={[
+                  <Button
+                    key="rename"
+                    type="text"
+                    size="small"
+                    icon={<EditOutlined style={{ color: '#1677ff' }} />}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setRenaming({ id: s.id, title: s.title });
+                    }}
+                  />,
+                  <Popconfirm
+                    key="delete"
+                    title="删除该会话？"
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                    onConfirm={(e) => {
+                      e?.stopPropagation();
+                      deleteSession(s.id);
+                    }}
+                  >
+                    <Button
+                      type="text"
+                      size="small"
+                      danger
+                      icon={<DeleteOutlined />}
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  </Popconfirm>,
+                ]}
+              >
+                <List.Item.Meta title={<span style={{ fontSize: 13 }}>{s.title}</span>} />
+              </List.Item>
             )}
-          </div>
-          {sessions.length > convPageSize && (
-            <Pagination
-              size="small"
-              current={safeConvPage}
-              pageSize={convPageSize}
-              total={sessions.length}
-              onChange={(pg) => setConvPage(pg)}
-              style={{ marginTop: 8, textAlign: 'center' }}
-            />
-          )}
+          />
         </div>
 
         {/* 右侧对话主体区（官方 Bubble.List + Sender） */}

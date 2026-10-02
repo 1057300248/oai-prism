@@ -15,6 +15,7 @@ interface AccountState {
   importModalOpen: boolean;
   editingAccount: AccountStats | null;
   editModalOpen: boolean;
+  accountNameMap: Map<string, string>; // 账号 ID -> 名称（统计页 hover 用）
 
   // Actions
   fetchAccounts: () => Promise<void>;
@@ -33,6 +34,7 @@ interface AccountState {
 
 export const useAccountStore = create<AccountState>((set, get) => ({
   accounts: [],
+  accountNameMap: new Map(),
   totalCount: 0,
   readyCount: 0,
   credsFile: '',
@@ -47,8 +49,11 @@ export const useAccountStore = create<AccountState>((set, get) => ({
     set({ loading: true });
     try {
       const data = await repo.fetchAccounts();
+      const nameMap = new Map<string, string>();
+      for (const a of data.accounts) nameMap.set(a.id, a.name);
       set({
         accounts: data.accounts,
+        accountNameMap: nameMap,
         totalCount: data.count,
         readyCount: data.ready,
         credsFile: data.creds_file,
