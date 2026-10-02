@@ -59,8 +59,19 @@ func (h *Handler) handleAnthropicMessages(w http.ResponseWriter, r *http.Request
 		ProjectID: projectID,
 		API:       "messages",
 	}
+	// 客户端显式句柄透传（真实前端从不发这两个字段 —— 10-01 抓包
+	// 92 条 start 全部 cid=N prev=N；上游对带 previous_response_id 的
+	// 请求把 input 当增量 → 上下文丢失）。
 	runReq.PreviousResponseID = previousResponseIDFrom(r, rawFields)
 	runReq.ConversationID = conversationIDFrom(r, rawFields)
+	// 历史注入：与 chat.go 同款 —— 上游不代管历史，单条消息客户端
+	// 把链缓存的历史拼进 input（对齐真实前端"全量回传"行为）。
+	if !historyCarriesContextA(req.Messages) {
+		if hist := sessionChainHistory(runReq.StickyKey); len(hist) > 0 {
+			runReq.Input = injectChainHistory(runReq.Input, hist)
+			runReq.PreviousResponseID = ""
+		}
+	}
 	runReq.Extra = passthroughFields(rawFields, anthropicKnownFields)
 
 	id := newID("msg_")
@@ -153,6 +164,11 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, runReq
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
 	bindLogAccount(r, res)
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	// 成功回复才记历史（同 chat.go）。
+	if res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "error", Text: runErr.Error()})
@@ -179,6 +195,11 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, runReq
 func (h *Handler) syncAnthropic(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id, publicModel string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	bindLogAccount(r, res)
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	// 成功回复才记历史（同 chat.go）。
+	if err == nil && res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

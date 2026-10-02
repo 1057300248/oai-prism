@@ -793,6 +793,14 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 			}
 			if env.Response.Payload != nil {
 				payload := env.Response.Payload
+				// payload.id 是上游真正的 response 句柄（resp_*），
+				// 多轮延续靠它；start 的 request_id 只是受理号。
+				out.ResponseID = payload.ID
+				// 终态 payload 里的驼峰 conversationId 兜底：顶层
+				// conversation_id 在终态常为 null，丢了会让会话链断组。
+				if payload.ConversationID != "" {
+					out.ConversationID = payload.ConversationID
+				}
 				out.DeltaFiles = payload.DeltaFiles
 				out.OutputItems = payload.Output
 
@@ -935,6 +943,10 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 			if payload != nil {
 				out.Text, out.Reasoning = extractCodexOutput(payload)
 				out.ReasoningDelta = out.Reasoning
+				// payload.id 是上游真正的 response 句柄（resp_* 形态），
+				// 多轮延续（previousResponseId）全靠它。宽松分支同样必须提取，
+				// 否则强类型分支因形态漂移失败时会话链就断了（2026-10-02 实测）。
+				out.ResponseID = FindString(payload, []string{"id"})
 				if u, ok := payload["usage"].(map[string]any); ok {
 					out.Usage = &Usage{
 						InputTokens:  intOf(u, "input_tokens", "prompt_tokens"),

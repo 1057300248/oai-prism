@@ -10,6 +10,7 @@ package prism
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -312,7 +313,11 @@ type StatusRequest struct {
 
 // StatusResponse 是轮询结果的归一化返回。
 type StatusResponse struct {
-	RequestID      string
+	RequestID string
+	// ResponseID 是终态 response.payload.id（形如 resp_muqwesyc_7xf7qrm8），
+	// 多轮延续时作为下一轮 start 的 previousResponseId。
+	// 与 RequestID（start 受理句柄）是两个不同的东西，实测勿混。
+	ResponseID     string
 	ConversationID string
 
 	// Status 是上游状态词：started / pending / completed。
@@ -352,7 +357,26 @@ type StatusResponse struct {
 type CodexDeltaFile struct {
 	FilePath string `json:"file_path"`
 	Status   string `json:"status"` // "added", "modified", "deleted"
-	Diff     string `json:"diff,omitempty"`
+	// Diff 是 diff 内容。实测上游形态不统一：早期是纯字符串（unified diff），
+	// 2026-10-02 起观察到对象形态（结构化变更）。强类型 string 会让整个
+	// PrismEnvelope 反序列化失败、退回宽松解析分支 —— 这里用 RawMessage 兼容。
+	Diff json.RawMessage `json:"diff,omitempty"`
+}
+
+// DiffString 把 Diff 归一化为字符串：JSON 字符串解出内容，其他形态
+// （对象/数组）原样 marshal 为文本。空返回 ""。
+func (f CodexDeltaFile) DiffString() string {
+	if len(f.Diff) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(f.Diff, &s); err == nil {
+		return s
+	}
+	// 非 JSON 字符串形态：去掉可能的首尾引号后原样返回。
+	out := string(f.Diff)
+	out = strings.TrimSpace(out)
+	return out
 }
 
 // CodexOutputItem 是上游返回的单个 Output 条目（Response 协议一等公民）。

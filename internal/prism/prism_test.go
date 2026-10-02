@@ -525,7 +525,7 @@ func TestParseEnvelope_RealProtocol(t *testing.T) {
 			t.Fatalf("预期提取 1 个 DeltaFile，实际得到 %d", len(st.DeltaFiles))
 		}
 		df := st.DeltaFiles[0]
-		if df.FilePath != "hello.txt" || df.Status != "added" || !strings.Contains(df.Diff, "+hello world") {
+		if df.FilePath != "hello.txt" || df.Status != "added" || !strings.Contains(df.DiffString(), "+hello world") {
 			t.Fatalf("DeltaFile 字段解析错误: %+v", df)
 		}
 	})

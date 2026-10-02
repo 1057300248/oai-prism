@@ -157,8 +157,42 @@ export class ChatRepositoryImpl implements IChatRepository {
     }
   }
 
+  /**
+   * 历史消息 → API messages 数组（末尾追加本轮 user 消息）。
+   *
+   * 三种历史 content 形态的还原：
+   *  - 纯文本字符串：直接用；
+   *  - 入库的多模态 JSON 串（persistContent 以 JSON.stringify 存储）：解析回内容块数组；
+   *  - 内存态带 attachments 的 user 消息：重建成 text + image_url 块。
+   * 失败轮（空内容/loading 占位）不上屏 —— 空回复会污染上下文。
+   */
+  private toApiMessages(history: ChatMessage[] | undefined, userContent: any): any[] {
+    const msgs: any[] = [];
+    for (const m of history ?? []) {
+      if (m.status === 'loading') continue;
+      if (!m.content || !m.content.trim()) continue;
+      let content: any = m.content;
+      if (content.startsWith('[{')) {
+        try {
+          const parsed = JSON.parse(content);
+          if (Array.isArray(parsed)) content = parsed;
+        } catch {
+          // 非法 JSON 串：保持原样当纯文本
+        }
+      } else if (m.role === 'user' && m.attachments && m.attachments.length > 0) {
+        content = [
+          { type: 'text', text: m.content },
+          ...m.attachments.map((a) => ({ type: 'image_url', image_url: { url: a.dataUrl } })),
+        ];
+      }
+      msgs.push({ role: m.role, content });
+    }
+    msgs.push({ role: 'user', content: userContent });
+    return msgs;
+  }
+
   async sendMessageStream(options: SendMessageOptions): Promise<void> {
-    const { sessionId, model, reasoningEffort, content, attachments, onChunk, onError, onFinish } = options;
+    const { sessionId, model, reasoningEffort, content, attachments, history, onChunk, onUsage, onError, onFinish } = options;
 
     try {
       // 组装 OpenAI 多模态消息：无附件 = 纯字符串；有附件 = text + image_url 内容块
@@ -193,12 +227,10 @@ export class ChatRepositoryImpl implements IChatRepository {
           model,
           reasoning_effort: reasoningEffort,
           stream: true,
-          messages: [
-            {
-              role: 'user',
-              content: userContent,
-            },
-          ],
+          stream_options: { include_usage: true },
+          // 上游不代管对话历史：必须回传完整 messages 才有上下文。
+          // 历史里含 assistant 消息时，网关会跳过自己的历史注入（避免重复）。
+          messages: this.toApiMessages(history, userContent),
         }),
       });
 
@@ -245,6 +277,15 @@ export class ChatRepositoryImpl implements IChatRepository {
 
           try {
             const parsed = JSON.parse(dataStr);
+            // include_usage 的收尾帧：choices 为空、只带 usage
+            if (parsed.usage && (!parsed.choices || parsed.choices.length === 0)) {
+              onUsage?.({
+                promptTokens: parsed.usage.prompt_tokens || 0,
+                completionTokens: parsed.usage.completion_tokens || 0,
+                totalTokens: parsed.usage.total_tokens || 0,
+              });
+              continue;
+            }
             const delta = parsed.choices?.[0]?.delta;
             if (delta) {
               const textChunk = delta.content || '';

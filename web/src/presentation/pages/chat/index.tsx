@@ -79,6 +79,7 @@ export const ChatPlaygroundPage: React.FC = () => {
     selectedModel,
     reasoningEffort,
     isStreaming,
+    lastUsage,
     init,
     selectSession,
     createNewSession,
@@ -398,6 +399,15 @@ export const ChatPlaygroundPage: React.FC = () => {
               <Bubble.List items={bubbleItems} />
             )}
           </div>
+
+          {/* 上下文窗口指示：本轮 token 用量（include_usage 收尾帧） */}
+          {lastUsage && (
+            <div style={{ padding: '6px 20px 0', display: 'flex', justifyContent: 'flex-end' }}>
+              <Text type="secondary" style={{ fontSize: 11 }}>
+                上下文窗口 · 输入 {lastUsage.promptTokens} + 输出 {lastUsage.completionTokens} = {lastUsage.totalTokens} tokens
+              </Text>
+            </div>
+          )}
 
           {/* 底部输入框（官方 Sender）：模型/强度切换与附件按钮都在输入框内，ChatGPT 式交互 */}
           <div style={{ padding: '12px 20px 16px', borderTop: '1px solid #f0f0f0', background: '#fff' }}>

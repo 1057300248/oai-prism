@@ -107,10 +107,29 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		API:          "responses",
 		ExtraHeaders: extractSentinelToken(r),
 	}
-	// Responses API 原生就有 previous_response_id，直接映射到上游的
-	// previousResponseId —— 这是最"应该"用上会话延续的一条路径。
+	// Responses API 原生就有 previous_response_id，客户端显式传入时透传。
+	// 注意：真实 Web 前端从不发这两个字段（10-01 抓包 92 条 start
+	// 全部 cid=N prev=N），多轮上下文靠"全量 input 回传"。
 	runReq.PreviousResponseID = req.PreviousResponseID
 	runReq.ConversationID = conversationIDFrom(r, rawFields)
+	// 历史注入：input 里没有 assistant 条目时视为"单条消息客户端"，
+	// 拼入链缓存的历史（上游不代管对话历史，见 session_chain.go 头注释）。
+	// Codex CLI / 标准 Responses 客户端会回传完整 input，天然跳过。
+	hasAssistant := false
+	for _, it := range runReq.Input {
+		if it.Role == "assistant" {
+			hasAssistant = true
+			break
+		}
+	}
+	if !hasAssistant {
+		if hist := sessionChainHistory(runReq.StickyKey); len(hist) > 0 {
+			runReq.Input = injectChainHistory(runReq.Input, hist)
+			// 带 previous_response_id 时上游把 input 当增量（服务端
+			// 不代管历史 → 上下文丢失），自己拼了历史就不能再带它。
+			runReq.PreviousResponseID = ""
+		}
+	}
 	runReq.Extra = passthroughFields(rawFields, responsesKnownFields)
 
 	id := newID("resp_")
@@ -221,7 +240,11 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 			return nil
 		}
 		res, runErr := h.runner.Run(r.Context(), runReq, emit)
-	bindLogAccount(r, res)
+		bindLogAccount(r, res)
+		sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+		if res != nil && res.Text != "" {
+			sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+		}
 
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
@@ -254,7 +277,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 				return nil
 			}
 			res2, runErr2 := h.runner.Run(r.Context(), &retry, emit2)
-	bindLogAccount(r, res2)
+			bindLogAccount(r, res2)
 			if runErr2 == nil && res2 != nil {
 				if js2, ok2 := extractExecBlock(sb2.String()); ok2 {
 					js = ensureExecJS(js2)
@@ -333,6 +356,11 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
 	bindLogAccount(r, res)
+	// 非桥流式路径同样要回写会话链，否则下一轮 fill 拿不到句柄。
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	if res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 	text := ""
 	var usage *prism.Usage
 	if res != nil {
@@ -373,6 +401,10 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	bindLogAccount(r, res)
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	if err == nil && res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

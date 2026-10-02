@@ -82,8 +82,14 @@ type RunResult struct {
 	Text      string
 	Reasoning string
 
-	// RequestID 是上游这次生成的句柄，可作为下一次的 PreviousResponseID。
-	RequestID      string
+	// RequestID 是上游 start 受理句柄（request_id，仅用于轮询/停止）。
+	//
+	// 注意：它**不能**作为下一次的 PreviousResponseID —— 逆向早期以为可以，
+	// 实测（2026-10-02 抓包）上游会静默忽略不存在的 response，表现为多轮无上下文。
+	// 真正的续接键是终态 payload.id（ResponseID 字段，形如 resp_muqwesyc_7xf7qrm8）。
+	RequestID string
+	// ResponseID 是终态 response.payload.id，才是多轮延续的 PreviousResponseID。
+	ResponseID     string
 	ConversationID string
 
 	// DeltaFiles 是沙箱中生成的文件增删改查变更集
@@ -360,6 +366,11 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	if projectID != "" {
 		inputItems = preprocessInputImages(ctx, r.client, p, projectID, inputItems)
 	}
+	// 注意：此处不做任何轮次标记/扰动。2026-10-02 实验矩阵证明
+	// system comment 与零宽空格两类标记本身就会让历史到达失败
+	//（带 marker 的 W/Y/N 系列全败，无 marker 的 B/B2/K 全胜）。
+	// 多轮上下文 = 每轮新 project（reuse_project: false）+ 全量历史，
+	// 不再叠加任何变换。
 
 	var startResp *prism.StartResponse
 	// 沙箱冷启动时上游会回 504 文案并提示 "Please submit prompt again"，
@@ -517,6 +528,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		if st.RequestID != "" {
 			requestID = st.RequestID
 			result.RequestID = requestID
+		}
+		if st.ResponseID != "" {
+			result.ResponseID = st.ResponseID
 		}
 		if st.ConversationID != "" {
 			convID = st.ConversationID

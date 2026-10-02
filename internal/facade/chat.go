@@ -55,6 +55,20 @@ func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) 
 	// 客户端如果自带上一轮的 response id，就沿用它的会话上下文。
 	runReq.PreviousResponseID = previousResponseIDFrom(r, rawFields)
 	runReq.ConversationID = conversationIDFrom(r, rawFields)
+	// 会话续接链 fill（已废弃）：实测真实 Web 前端从不发 conversationId /
+	// previousResponseId（10-01 抓包 92 条 start 全部 cid=N prev=N），
+	// 上游对带 previous_response_id 的请求把 input 当增量 → 上下文丢失。
+	// 多轮上下文完全靠"全量 input 回传"，见下方历史注入。
+	// 历史注入：上游不代管对话历史，客户端只发本轮 user 消息时
+	// 把链缓存的历史拼进 input（对齐真实前端"全量回传"行为）。
+	// 标准客户端（每次回传完整 messages）会命中 historyCarriesContext，
+	// 直接跳过，避免历史重复。
+	if !historyCarriesContext(req.Messages) {
+		if hist := sessionChainHistory(runReq.StickyKey); len(hist) > 0 {
+			runReq.Input = injectChainHistory(runReq.Input, hist)
+			runReq.PreviousResponseID = ""
+		}
+	}
 	runReq.Extra = passthroughFields(rawFields, chatKnownFields)
 
 	started := time.Now()
@@ -171,6 +185,11 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
 	bindLogAccount(r, res)
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	// 成功回复才记历史：失败的轮次进历史会把"空回答"教给模型。
+	if res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 
 	if runErr != nil {
 		// 响应头已经发出去了，没法再改状态码。
@@ -246,6 +265,11 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 func (h *Handler) syncChat(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, declaredTools []ChatTool) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	bindLogAccount(r, res)
+	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	// 成功回复才记历史：失败的轮次进历史会把"空回答"教给模型。
+	if err == nil && res != nil && res.Text != "" {
+		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	}
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

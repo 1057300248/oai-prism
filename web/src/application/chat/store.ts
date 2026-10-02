@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ChatAttachment, ChatMessage, ChatModelInfo, ChatSession, ReasoningEffort } from '../../domain/chat/entity';
+import type { ChatAttachment, ChatMessage, ChatModelInfo, ChatSession, ChatUsage, ReasoningEffort } from '../../domain/chat/entity';
 import { effortsForModel } from '../../domain/modelFilter';
 import { ChatRepositoryImpl } from '../../infrastructure/repositories/chat.repo.impl';
 
@@ -13,6 +13,7 @@ interface ChatState {
   selectedModel: string;
   reasoningEffort: ReasoningEffort;
   isStreaming: boolean;
+  lastUsage: ChatUsage | null; // 本轮 token 用量（上下文窗口可视化）
 
   // Actions
   init: () => Promise<void>;
@@ -33,6 +34,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   selectedModel: 'gpt-6.1-sol',
   reasoningEffort: 'medium',
   isStreaming: false,
+  lastUsage: null,
 
   init: async () => {
     const [{ mains, allIds }, sessions] = await Promise.all([
@@ -151,6 +153,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       attachments,
       model: selectedModel,
       reasoningEffort,
+      // 上游不代管对话历史：把既有消息（历史轮）回传给网关拼进上下文。
+      // 只取到 userMsg 为止，不含 assistantMsg 占位（它此刻还是空的）。
+      history: [...session.messages],
+      onUsage: (usage) => set({ lastUsage: usage }),
       onChunk: (chunk, reasoningChunk) => {
         if (chunk) currentContent += chunk;
         if (reasoningChunk) currentReasoning += reasoningChunk;

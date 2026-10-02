@@ -82,7 +82,7 @@ func MapDeltaFilesToToolCalls(files []prism.CodexDeltaFile, declaredTools []Chat
 
 	toolCalls := make([]ToolCall, 0, len(files))
 	for i, f := range files {
-		content := ExtractContentFromDiff(f.Diff)
+		content := ExtractContentFromDiff(f.DiffString())
 		fnName := preferredWriteTool
 		argsMap := make(map[string]any)
 
@@ -95,7 +95,7 @@ func MapDeltaFilesToToolCalls(files []prism.CodexDeltaFile, declaredTools []Chat
 			if hasDeclaredEdit && !hasDeclaredWrite {
 				fnName = preferredEditTool
 				argsMap["path"] = f.FilePath
-				argsMap["diff"] = f.Diff
+				argsMap["diff"] = f.DiffString()
 				argsMap["content"] = content
 			} else {
 				fnName = preferredWriteTool
@@ -155,7 +155,7 @@ func ApplyLocalWorkspaceFiles(workspaceRoot string, files []prism.CodexDeltaFile
 			return fmt.Errorf("创建目录失败 (%s): %w", filepath.Dir(targetPath), err)
 		}
 
-		content := ExtractContentFromDiff(f.Diff)
+		content := ExtractContentFromDiff(f.DiffString())
 		if err := os.WriteFile(targetPath, []byte(content), 0644); err != nil {
 			return fmt.Errorf("写入本地文件失败 (%s): %w", targetPath, err)
 		}

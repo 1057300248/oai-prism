@@ -9,6 +9,13 @@ export interface ChatModelInfo {
 
 export type ReasoningEffort = 'low' | 'medium' | 'high' | 'xhigh';
 
+/** 一轮推理的 token 用量（OpenAI include_usage 语义） */
+export interface ChatUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
 /** 附件（当前支持图片，走 OpenAI image_url 多模态格式，后端 translate 原生转换） */
 export interface ChatAttachment {
   name: string;
@@ -48,7 +55,11 @@ export interface SendMessageOptions {
   attachments?: ChatAttachment[];
   model: string;
   reasoningEffort: ReasoningEffort;
+  /** 本会话此前的对话历史（不含本轮 user 消息与 assistant 占位）。
+   * 上游不代管对话历史，每次请求必须回传完整 messages 才有上下文。 */
+  history?: ChatMessage[];
   onChunk?: (chunk: string, reasoningChunk?: string) => void;
+  onUsage?: (usage: ChatUsage) => void;
   onError?: (err: Error) => void;
   onFinish?: () => void;
 }
