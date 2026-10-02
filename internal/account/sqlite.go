@@ -148,11 +148,18 @@ func (s *SQLiteStore) initSchema() error {
 
 // Close 关闭数据库。
 func (s *SQLiteStore) Close() error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 	if s.db != nil {
 		err := s.db.Close()
 		s.db = nil
@@ -171,11 +178,18 @@ func (s *SQLiteStore) Path() string {
 
 // Load 读取 SQLite 中所有已保存的账号。
 func (s *SQLiteStore) Load() ([]config.AccountConfig, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, errSQLiteUnavailable
+	}
 
 	rows, err := s.db.Query(`
 		SELECT id, name, plan, email, cookies, access_token, refresh_token, max_concurrency, tags
@@ -215,11 +229,18 @@ func (s *SQLiteStore) Load() ([]config.AccountConfig, error) {
 
 // SaveAccount 插入或更新单账号 (Create or Update)。
 func (s *SQLiteStore) SaveAccount(a config.AccountConfig) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	if strings.TrimSpace(a.ID) == "" {
 		a.ID = fmt.Sprintf("acc_%d", time.Now().UnixNano())
@@ -274,11 +295,18 @@ func (s *SQLiteStore) SaveAccount(a config.AccountConfig) error {
 
 // DeleteAccount 从 SQLite 中物理删除账号 (Delete)。
 func (s *SQLiteStore) DeleteAccount(id string) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	res, err := s.db.Exec("DELETE FROM accounts WHERE id = ?", id)
 	if err != nil {
@@ -293,10 +321,14 @@ func (s *SQLiteStore) DeleteAccount(id string) error {
 
 // MigrateIfEmpty 如果 SQLite 为空，自动把现有列表迁移进来。
 func (s *SQLiteStore) MigrateIfEmpty(existing []config.AccountConfig) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
+	if s.db == nil {
+		s.mu.Unlock()
+		return errSQLiteUnavailable
+	}
 	var count int
 	_ = s.db.QueryRow("SELECT COUNT(*) FROM accounts").Scan(&count)
 	s.mu.Unlock()
@@ -376,11 +408,18 @@ type AggregatedStats struct {
 
 // RecordRequestLog 将一笔真实请求记录持久化至 SQLite。
 func (s *SQLiteStore) RecordRequestLog(item RequestLogItem) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	if item.ID == "" {
 		item.ID = fmt.Sprintf("req_%d", time.Now().UnixNano())
@@ -416,11 +455,18 @@ func (s *SQLiteStore) RecordRequestLog(item RequestLogItem) error {
 
 // QueryRequestLogs 分页查询请求流水明细。
 func (s *SQLiteStore) QueryRequestLogs(filter RequestLogFilter) ([]RequestLogItem, int, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, 0, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, 0, errSQLiteUnavailable
+	}
 
 	if filter.Page <= 0 {
 		filter.Page = 1
@@ -512,11 +558,18 @@ func (s *SQLiteStore) QueryRequestLogs(filter RequestLogFilter) ([]RequestLogIte
 
 // GetAggregatedStats 基于 SQLite 真实请求明细计算真实统计指标。
 func (s *SQLiteStore) GetAggregatedStats() (*AggregatedStats, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, errSQLiteUnavailable
+	}
 
 	stats := &AggregatedStats{
 		ModelUsages: []ModelUsageStat{},
@@ -634,11 +687,18 @@ type ChatMessageRecord struct {
 
 // ListChatSessions 查询所有持久化调试会话。
 func (s *SQLiteStore) ListChatSessions() ([]ChatSessionRecord, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, errSQLiteUnavailable
+	}
 
 	rows, err := s.db.Query(`
 		SELECT id, title, model, reasoning_effort, created_at, updated_at
@@ -670,11 +730,18 @@ func (s *SQLiteStore) ListChatSessions() ([]ChatSessionRecord, error) {
 
 // SaveChatSession 保存或更新会话。
 func (s *SQLiteStore) SaveChatSession(sess ChatSessionRecord) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	query := `
 	INSERT INTO chat_sessions (id, title, model, reasoning_effort, created_at, updated_at)
@@ -691,11 +758,18 @@ func (s *SQLiteStore) SaveChatSession(sess ChatSessionRecord) error {
 
 // DeleteChatSession 删除会话及级联消息。
 func (s *SQLiteStore) DeleteChatSession(id string) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	_, _ = s.db.Exec("DELETE FROM chat_messages WHERE session_id = ?", id)
 	_, err := s.db.Exec("DELETE FROM chat_sessions WHERE id = ?", id)
@@ -704,11 +778,18 @@ func (s *SQLiteStore) DeleteChatSession(id string) error {
 
 // ListChatMessages 获取会话的消息历史。
 func (s *SQLiteStore) ListChatMessages(sessionID string) ([]ChatMessageRecord, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, errSQLiteUnavailable
+	}
 
 	rows, err := s.db.Query(`
 		SELECT id, session_id, role, content, reasoning, status, created_at
@@ -738,11 +819,18 @@ func (s *SQLiteStore) ListChatMessages(sessionID string) ([]ChatMessageRecord, e
 
 // SaveChatMessage 保存一条消息。
 func (s *SQLiteStore) SaveChatMessage(m ChatMessageRecord) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	if m.ID == "" {
 		m.ID = fmt.Sprintf("msg_%d", time.Now().UnixNano())
@@ -776,11 +864,18 @@ type APIKeyItem struct {
 
 // ListAPIKeys 列出所有已授权的 API Keys。
 func (s *SQLiteStore) ListAPIKeys() ([]APIKeyItem, error) {
-	if !s.ready() {
+	if s == nil {
 		return nil, errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return nil, errSQLiteUnavailable
+	}
 
 	rows, err := s.db.Query(`
 		SELECT key, name, created_at
@@ -809,11 +904,18 @@ func (s *SQLiteStore) ListAPIKeys() ([]APIKeyItem, error) {
 
 // SaveAPIKey 保存新的 API Key。
 func (s *SQLiteStore) SaveAPIKey(item APIKeyItem) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	if item.Key == "" {
 		item.Key = fmt.Sprintf("sk-prism-%d", time.Now().UnixNano())
@@ -833,11 +935,18 @@ func (s *SQLiteStore) SaveAPIKey(item APIKeyItem) error {
 
 // DeleteAPIKey 删除指定的 API Key。
 func (s *SQLiteStore) DeleteAPIKey(key string) error {
-	if !s.ready() {
+	if s == nil {
 		return errSQLiteUnavailable
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	// 锁内检查：Close() 会在持锁状态下把 s.db 置 nil，
+	// 锁外检查存在 TOCTOU 竞态（ready() 过后 db 被清空 → exec(nil) panic，
+	// 2026-10-03 CI 并发测试实证）。
+	if s.db == nil {
+		return errSQLiteUnavailable
+	}
 
 	_, err := s.db.Exec("DELETE FROM api_keys WHERE key = ?", key)
 	return err

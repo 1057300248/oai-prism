@@ -5,7 +5,9 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/oai-prism/oaiprism/internal/config"
 )
@@ -83,4 +85,43 @@ func TestSQLiteStore_RecordAndQuery(t *testing.T) {
 	if err != nil || len(list) == 0 {
 		t.Fatalf("Load: err=%v list=%+v", err, list)
 	}
+}
+
+// 并发回归（2026-10-03 CI 实证）：Close() 与后台写入竞争时不能 panic。
+// 修复前 Close 在锁内把 s.db 置 nil，而写入方法的 ready() 检查在锁外 ——
+// ready() 过后 db 被清空，exec(nil) 直接 panic。
+func TestSQLiteStore_CloseRace(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewSQLiteStore(filepath.Join(dir, "race.db"), slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	if err != nil {
+		t.Fatalf("NewSQLiteStore: %v", err)
+	}
+
+	done := make(chan struct{})
+	var wg sync.WaitGroup
+	// 写侧：持续写日志（模拟 requestAuditMiddleware 的后台 goroutine）
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-done:
+				return
+			default:
+				// 允许返回 errSQLiteUnavailable（Close 之后），但不能 panic
+				_ = store.RecordRequestLog(RequestLogItem{Method: "POST", Path: "/v1/chat/completions"})
+			}
+		}
+	}()
+	// 关闭侧：与其他操作并发
+	time.Sleep(20 * time.Millisecond)
+	_ = store.Close()
+	close(done)
+	wg.Wait()
+
+	// Close 之后再调用也必须安全
+	if err := store.RecordRequestLog(RequestLogItem{}); !errors.Is(err, errSQLiteUnavailable) {
+		t.Fatalf("Close 后 RecordRequestLog 应返回 errSQLiteUnavailable，得到 %v", err)
+	}
+	_ = store.Close() // 幂等
 }
