@@ -38,15 +38,35 @@ if (Test-Port 8787) {
         -WindowStyle Hidden
 }
 
-Write-Host "[2/3] 检查 8790 (browser sidecar) ..."
-if (Test-Port 8790) {
-    Write-Host "    已在运行，跳过"
+Write-Host "[2/3] 启动 8790 (oracle + Go TLS 桥) ..."
+# token-oracle 架构：node 只签发 token（8791），Go 桥承担全部数据面（8790）
+if (Test-Port 8791) {
+    Write-Host "    8791 oracle 已在运行"
 } else {
-    Write-Host "    启动 sidecar（会拉起一个 Chrome 窗口，属正常）..."
+    Write-Host "    启动 oracle（会拉起一个 Chrome 窗口，属正常）..."
     Start-Process -FilePath $Node `
-        -ArgumentList @("$Repo\tools\browser_sidecar.js", "auto", "8790") `
-        -RedirectStandardOutput "$LogDir\sidecar.log" `
-        -RedirectStandardError "$LogDir\sidecar.err.log" `
+        -ArgumentList @("$Repo\tools\sentinel_oracle.js", "auto", "8791") `
+        -RedirectStandardOutput "$LogDir\oracle.log" `
+        -RedirectStandardError "$LogDir\oracle.err.log" `
+        -WindowStyle Hidden
+}
+if (Test-Port 8790) {
+    Write-Host "    8790 桥已在运行，跳过"
+} else {
+    Write-Host "    等待 oracle 就绪后启动 Go TLS 桥..."
+    Start-Sleep -Seconds 25
+    $Exe = "$env:TEMP\oaiprism.exe"
+    if (-not (Test-Path $Exe)) {
+        Write-Host "    本地无二进制，先构建..."
+        Push-Location $Repo
+        go build -o $Exe ./cmd/oaiprism
+        Pop-Location
+    }
+    Start-Process -FilePath $Exe `
+        -ArgumentList @("tlsbridge", "-port", "8790", "-oracle", "http://127.0.0.1:8791", "-accounts", "$Repo\secrets\accounts.json") `
+        -WorkingDirectory $Repo `
+        -RedirectStandardOutput "$LogDir\tlsbridge.log" `
+        -RedirectStandardError "$LogDir\tlsbridge.err.log" `
         -WindowStyle Hidden
 }
 
