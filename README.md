@@ -13,13 +13,14 @@ Go 单二进制，零 CGO，无运行时依赖。
 ```
                               ┌──────────────────────────────────────────────┐
    OpenAI SDK / Codex CLI ──► │  8787  OAIprism 网关（Go 单二进制）           │
-   Anthropic SDK          ──► │  ├─ /v1/chat/completions   OpenAI 门面        │
-   curl / 任意 HTTP 客户端 ──► │  ├─ /v1/responses          Responses 门面     │
-                              │  ├─ /v1/messages           Anthropic 门面     │
-                              │  ├─ /prism/*               原样反代通道       │
-                              │  ├─ /admin/*               管理 API（账号/日志）│
-                              │  ├─ /  + /assets/*         Dashboard（web/dist）│
-                              │  └─ /metrics               Prometheus 指标     │
+   Anthropic SDK          ──► │  ├─ /v1/*          OpenAI/Anthropic 门面      │
+   curl / 任意 HTTP 客户端 ──► │  │   （chat/completions、responses、messages）│
+                              │  ├─ /prism/*       原样反代通道（白名单）      │
+                              │  ├─ /admin/*       管理 API（账号/日志/会话/  │
+                              │  │                 API Key/OAuth，见「端点一览」）│
+                              │  ├─ /dashboard/    Dashboard 静态资源（web/dist）│
+                              │  ├─ /healthz /readyz /metrics                  │
+                              │  └─ /chat/completions 等无前缀别名（兼容老客户端）│
                               └───────────────┬──────────────────────────────┘
                                               │ 调优 HTTP 客户端（强 HTTP/2、
                                               │ 连接预热、往返 0 拷贝）
@@ -52,14 +53,15 @@ Go 单二进制，零 CGO，无运行时依赖。
 
 | 端口 | 服务 | 归属 | 说明 |
 |---|---|---|---|
-| **8787** | OAIprism 网关 | `oaiprism serve` | 对外唯一入口：API + Dashboard + 指标。`0.0.0.0` 可配 |
+| **8787** | OAIprism 网关 | `oaiprism serve` | 对外唯一入口：API（`/v1/*`、`/prism/*`、`/admin/*`）+ Dashboard（`/dashboard/`）+ 探针与指标 |
 | **8790** | Go TLS 桥 | `oaiprism tlsbridge` | 仅本机监听；网关的 `upstream.base_url` 指向它 |
 | **8791** | Sentinel token oracle | `tools/sentinel_oracle.js` | 仅本机监听；只提供 `POST /token` 与 `GET /healthz` |
-| 8787(HTTP) | Dashboard 静态资源 | 网关内置 | `web/dist` 由网关伺服，无需独立端口 |
 
-> 桥模式（`8790`）是生产默认；仅做只读探测时可把 `upstream.base_url`
-> 直连 `https://prism.openai.com`，但没有 Sentinel token 的写操作会被
-> 上游 403 拒绝。详见 `configs/config.example.yaml` 的 upstream 注释。
+> Dashboard 没有独立端口，由网关在 `/dashboard/` 伺服（访问 `/dashboard`
+> 会 302 补斜杠）。桥模式（`8790`）是生产默认；仅做只读探测时可把
+> `upstream.base_url` 直连 `https://prism.openai.com`，但没有 Sentinel
+> token 的写操作会被上游 403 拒绝。详见 `configs/config.example.yaml`
+> 的 upstream 注释。
 
 ---
 
@@ -72,7 +74,19 @@ Go 单二进制，零 CGO，无运行时依赖。
 | 缓冲 | `sync.Pool` + `bufio` | 稳态零分配；SSE 逐帧 `Flush` |
 | JSON | 手写编码器 | 热路径上避开反射与 map 分配，单 chunk 编码开销下降一个数量级 |
 | 指标 | 自研 Prometheus 文本输出 | 只用了十几个指标，不值得引入 5 个间接依赖 |
-| 依赖总数 | **1**（`gopkg.in/yaml.v3`） | 供应链面小到可以人工审计 |
+| 依赖总数 | **5 个直接依赖** | 供应链面小到可以人工审计 |
+
+直接依赖清单（`go.mod`，全部有明确不可替代性）：
+
+| 依赖 | 用途 | 为什么不自己写 |
+|---|---|---|
+| `gopkg.in/yaml.v3` | 配置解析 | 配置文件的既定格式 |
+| `github.com/bogdanfinn/tls-client`（+ `fhttp`） | 桥的 Chrome 系 TLS 指纹传输 | 指纹细节（ciphersuite 顺序、扩展、ALPN）无法用标准库表达 |
+| `modernc.org/sqlite` | Dashboard 持久化（账号/会话/请求日志） | 纯 Go 实现，**保持零 CGO**；database/sql 驱动接口 |
+| `golang.org/x/time` | 令牌桶限流 | `rate.Limiter` 是标准做法，自写只会写错 |
+
+退出标准：新增依赖必须能回答"标准库为什么不够"。指标、SSE、JSON
+编码、限流闸门、直方图仍为自研。
 
 ---
 
@@ -89,25 +103,34 @@ go build -o oaiprism.exe ./cmd/oaiprism
 **推荐方式**：一条命令搞定，顺带在线校验。
 
 ```bash
-# 从浏览器开发者工具复制整串 Cookie 后：
-./oaiprism.exe import -cookie "__Secure-next-auth.session-token=eyJ..." -id main
+# 从浏览器开发者工具复制整串 Cookie 后（Prism 的登录 cookie）：
+./oaiprism.exe import -cookie "prism_oai_access_token=eyJ...; prism_session_token=..." -id main
+
+# 只给 access token 的值（Prism 的 JWT，约 10 天有效）：
+./oaiprism.exe import -access-token "eyJhbGci..." -id main
+
+# 只给会话 cookie 的值：
+./oaiprism.exe import -session-token "eyJ..." -id main
+
+# 有 refresh_token 最省心（约 90 天有效，可自动续期）：
+./oaiprism.exe import -refresh-token "rt.1..." -id main
 
 # 或者从标准输入读，避免 shell 历史泄漏：
 ./oaiprism.exe import -stdin -id main
 
-# 已经拿到 JWT 的话：
-./oaiprism.exe import -access-token "eyJhbGci..." -id main
-
-# 有 refresh_token 最省心（可无限自动续期）：
-./oaiprism.exe import -refresh-token "..." -id main
+# 也可以走官方 OAuth 授权（浏览器回调，无需手工复制 cookie）：
+#   启动后在 Dashboard「账号」页点「官方授权导入」，
+#   或调用 POST /admin/oauth/begin 按提示完成。
 ```
 
 命令会做四件事：向上游验证凭据 → 补全 email/plan/account_id →
 （若可能）换取 refresh_token 以获得自愈能力 → 写入 `secrets/accounts.json`。
 
-> 凭据从哪拿：登录 `prism.openai.com`，打开开发者工具 →
-> Application → Cookies → 复制 `__Secure-next-auth.session-token` 那一行；
-> 或 Network 面板里任意请求的完整 Cookie 头。
+> 凭据从哪拿：登录 `prism.openai.com`，打开开发者工具 → Application →
+> Cookies，复制 `prism_oai_access_token`（真正的 Bearer JWT）与
+> `prism_session_token`；或 Network 面板里任意请求的完整 Cookie 头。
+> 注意 Prism 用的是自家 cookie 体系（`prism_oai_*` / `prism_session_token`），
+> **不是** next-auth 的 `__Secure-next-auth.session-token`。
 
 也可以直接编辑 `secrets/accounts.json`（参考 `secrets/accounts.example.json`）。
 **服务运行中保存该文件即自动生效，5 秒内热加载，无需重启。**
@@ -156,10 +179,10 @@ cp configs/config.example.yaml configs/config.yaml
 ### 4. 用起来
 
 ```bash
-# OpenAI 风格
+# OpenAI 风格（默认模型 gpt-6.1-sol，可选 gpt-6-luna / gpt-5.6-sol 等）
 curl http://127.0.0.1:8787/v1/chat/completions \
   -H "Content-Type: application/json" \
-  -d '{"model":"gpt-5","stream":true,"messages":[{"role":"user","content":"你好"}]}'
+  -d '{"model":"gpt-6.1-sol","stream":true,"messages":[{"role":"user","content":"你好"}]}'
 
 # 直接指向官方 SDK
 export OPENAI_BASE_URL=http://127.0.0.1:8787/v1
@@ -168,28 +191,64 @@ export OPENAI_API_KEY=sk-oaiprism-your-secret
 # Anthropic 风格
 export ANTHROPIC_BASE_URL=http://127.0.0.1:8787
 
+# 多轮会话：同一 X-Oaiprism-Session 头 = 同一会话（项目复用 + 历史折叠）
+curl http://127.0.0.1:8787/v1/chat/completions \
+  -H "X-Oaiprism-Session: my-chat-1" -H "Content-Type: application/json" \
+  -d '{"model":"gpt-6.1-sol","stream":false,"messages":[{"role":"user","content":"记住暗号：蓝莓芝士"}]}'
+
 # 原样反代（不懂协议也能用）
 curl http://127.0.0.1:8787/prism/api/auth/session
+
+# Dashboard（账号管理 / 会话调试 / 请求统计）
+# 浏览器打开 http://127.0.0.1:8787/dashboard/
 ```
 
 ---
 
 ## 端点一览
 
+**推理门面**（`facade.enabled: true` 时注册；另有 `/chat/completions`、
+`/responses`、`/models` 三个无前缀别名，兼容老客户端）：
+
 | 端点 | 说明 |
 |---|---|
-| `POST /v1/chat/completions` | OpenAI Chat Completions（流式/非流式） |
+| `POST /v1/chat/completions` | OpenAI Chat Completions（流式/非流式、多模态附件） |
 | `POST /v1/completions` | 老式 Completions，内部转 chat |
-| `POST /v1/responses` | OpenAI Responses API（新版 SDK / Codex CLI 首选） |
+| `POST /v1/responses` | OpenAI Responses API（新版 SDK / Codex CLI 首选；含工具桥模式） |
 | `POST /v1/messages` | Anthropic Messages（含完整流式事件序列） |
-| `GET /v1/models` | 可用模型列表 |
-| `/prism/*` | **原样反代通道**，按白名单转发到上游 |
+| `GET /v1/models`、`GET /v1/models/{id}` | 模型清单（唯一真相源，含各档位变体） |
+| `GET /v1` | 索引页（列出可用端点） |
+| `POST /v1/embeddings`、`POST /v1/images/generations` | 明确 501 —— 上游只提供对话式补全 |
+
+**运维与探针**：
+
+| 端点 | 说明 |
+|---|---|
 | `GET /healthz` | 存活探针（不检查下游，避免上游抖动导致误重启） |
 | `GET /readyz` | 就绪探针（无可用账号时明确返回 503） |
 | `GET /metrics` | Prometheus 文本指标 |
+| `GET /dashboard/` | Dashboard（访问 `/dashboard` 会 302 补斜杠；根路径 `/` 未注册） |
+
+**管理 API**（`/admin/*`）：
+
+| 端点 | 说明 |
+|---|---|
 | `GET /admin/accounts` | 账号池状态（不含凭据） |
-| `POST /admin/reload` | 手动重载凭据文件 |
+| `POST /admin/accounts`、`PUT /admin/accounts/{id}`、`DELETE /admin/accounts/{id}` | 账号增删改 |
 | `POST /admin/accounts/{id}/refresh` | 强制刷新某个账号的 token |
+| `POST /admin/reload` | 手动重载凭据文件 |
+| `POST /admin/oauth/begin`、`GET /admin/oauth/status`、`GET /admin/oauth/callback`、`POST /admin/oauth/exchange` | 官方 OAuth 授权导入（PKCE，localhost 回调） |
+| `GET /admin/requests` | 请求明细（含模型/账号绑定、耗时） |
+| `GET /admin/statistics` | 调用统计 |
+| `GET /admin/stats` | 运行态汇总 |
+| `GET/POST /admin/chat/sessions`、`DELETE /admin/chat/sessions/{id}`、`GET/POST /admin/chat/sessions/{id}/messages` | Dashboard 会话 CRUD（SQLite 持久化） |
+| `GET/POST /admin/apikeys`、`DELETE /admin/apikeys/{key}` | 调用方 API Key 管理 |
+| `POST /admin/login`、`GET /admin/me` | Dashboard 登录态 |
+
+**原样反代**：`/prism/*`（前缀可配）按白名单转发到上游，见「安全要点」。
+
+> 完整注册表见 `internal/server/server.go` 与 `internal/facade/http.go`；
+> 任何一端点变更都应在两处同步。
 
 ### 请求级控制头
 
@@ -200,6 +259,7 @@ curl http://127.0.0.1:8787/prism/api/auth/session
 | `X-Oaiprism-Project` | 强制使用某个上游项目 ID |
 | `X-Oaiprism-Model` | 覆盖模型名 |
 | `X-Oaiprism-Effort` | 覆盖推理强度 |
+| `X-Oaiprism-Previous` | 显式传入上一轮 `response_id`（续接用） |
 
 ---
 
@@ -223,16 +283,20 @@ curl http://127.0.0.1:8787/prism/api/auth/session
 **轮询转流式**
 
 上游是 start + poll 协议，天生不是流式的。这里做了三件事把它压成流式：
-1. **长轮询**：`waitMs=10000`，有内容立刻返回、没内容挂起
+1. **可选长轮询**：配 `use_status_wait: true` 后带 `waitMs`（默认
+   10000），有内容立刻返回、没内容挂起。当前本地配置为 `false`
+   （纯轮询 + 退避），两种模式的代码路径都有测试。
 2. **自适应退避**：若上游忽略 `waitMs`（响应耗时 < 250ms），自动退避，
-   不会退化成忙轮询；长轮询生效时则不叠加 sleep
+   不会退化成忙轮询；长轮询生效时则不叠加 sleep。
 3. **前缀差分**：不管上游返回累计全文还是结构化消息列表，
-   用前缀差分还原 token 级增量，因此不依赖具体响应形态
+   用前缀差分还原 token 级增量，因此不依赖具体响应形态。
 
 **项目复用**
 
-`POST /api/projects` 比推理调用本身还慢。同一会话只建一次工程并长期复用；
-无会话标识的请求走轮转分桶，避免所有请求挤在一个项目里被上游串行化。
+`POST /api/projects` 比推理调用本身还慢。同一会话只建一次工程并长期复用
+（`reuse_project: true`）；无会话标识的请求走轮转分桶，避免所有请求挤在
+一个项目里被上游串行化。复用键就是下面的 `StickyKey`：显式
+`X-Oaiprism-Session` 头 > 请求体 `user` 字段 > 首条消息指纹。
 
 **可观测**
 
@@ -301,13 +365,14 @@ E2E 测试里有一条断言：一旦有请求打到 `/api/lim/`，测试立刻�
 并且循环内做了**无条件节流**（绝不会退化成零间隔忙轮询）。
 出现 429 就调大 `poll_interval`。
 
-### 仍未确认的三件事
+### 已定论与仍待验证
 
-| 项 | 状态 |
+| 项 | 结论 |
 |---|---|
-| `pending` 帧里是否有累计正文 | **待验证**——两种形态都已支持并有测试，但哪种是真的要真凭据才知道 |
-| OpenAI 的 `tools` 该映射到哪 | **待验证**——真实前端请求体里没有它，暂放 `metadata.tools` |
-| 上游可用模型列表 | 默认 `gpt-5.6-sol`，真实列表由 Statsig 开关动态下发 |
+| OpenAI 的 `tools` 该映射到哪 | **已定论**：上游是 server-side tools 架构（`response_with_tools_*`，工具循环在沙箱内消化，终态 output 只有 message），客户端 `tools` 无意义 —— 本地 Codex CLI 的文件操作经**工具桥**（`codex-exec` 块由 CLI 本地执行）实现，见 `internal/facade/toolbridge.go` |
+| 上游可用模型列表 | **已内建映射表**（`GET /v1/models` 是唯一真相源）：4 主模型 × 档位 = 14 项 —— `gpt-6.1-sol`（默认，含 low/high/xhigh）、`gpt-6-luna`（high/xhigh）、`gpt-5.6-sol`（low/high/xhigh）、`gpt-5.6-terra`（high/xhigh），见 `internal/config/config.go` |
+| `pending` 帧里是否有累计正文 | **仍待验证** —— 两种形态都已支持并有测试 |
+| 多轮上下文机制 | **已实测定稿**，见下节「多轮上下文与上下文窗口」 |
 
 ### 字段名仍是可配置的
 
@@ -315,8 +380,68 @@ E2E 测试里有一条断言：一旦有请求打到 `/api/lim/`，测试立刻�
 改字段不需要重新编译。校准流程：
 
 ```bash
-./oaiprism.exe capture-summary -file captures/capture-2026-09-16.jsonl
+# 抓包摘要在协议考古期使用（capture.enabled: true 时才有新抓包文件）
+./oaiprism.exe capture-summary -file captures/capture-<日期>.jsonl
 ```
+
+## 多轮上下文与上下文窗口（2026-10-02 实测定稿）
+
+这一节的所有结论都来自**真实请求对照实验**与 **playwright 驱动真实
+浏览器考古**（脚本与原始数据在 `tools/webui_probe*.js`、`tools/probe_context_limit.py`），
+不是推断。
+
+### 上游的两个硬事实
+
+1. **单次请求只处理「首条 system + 最后一条 user」**，中间的 input
+   条目全部丢弃（`translate.go` 头注释记载；对照实验 9/9 验证）。
+2. **conversation 的上下文窗口 ≈ 2M tokens**：浏览器内对同一
+   conversation 连续增量累积 88 轮，1,923,198 tokens 时仍完整记得
+   暗号，1.95M 起连续失败（`tools/webui_probe7_log.jsonl`）。
+   另测：**单条消息上限 ≈ 15–16k tokens**，超限错误文案为
+   `This request is too large to send. Shorten your message or selected text...`
+   （编辑器话术，别与窗口上限混淆）。
+
+### 生产策略：全量折叠（当前）
+
+每轮 = **新 conversation + 全量 input**，历史由 `translateChatMessages`
+折叠成 `[Previous Conversation History]` 文本块并进首条 system ——
+单条消息客户端（如 Dashboard）的上下文由网关的会话历史缓存
+（`internal/facade/session_chain.go`，24k 字符 / 20 条双预算 +
+超限标注）自动注入。实测三轮暗号测试全通过。
+
+### 原生续接协议（已逆向，待通道落地）
+
+真实 Web 的多轮续接形状已完全逆向（playwright 抓包 + 页面内重放验证）：
+
+```
+第 2 轮起：conversationId = 上一轮 cdx1_*（不变）
+           previousResponseId = 上一轮终态 payload.id（resp_* 形态）
+           metadata.codex_listen_snapshot = 上一轮下发（含
+             codex_session_id / transcript_cursor / last_turn_id）
+           input = 仅本轮增量（编辑器状态 system + 本轮 user），零历史
+           metadata.userId = user-* 形态（来自 access_token JWT 的
+             chatgpt_user_id claim，网关已自动填充）
+```
+
+**在真实浏览器内重放同款请求 → 续接成功（答对暗号）；
+Go tlsbridge 通道发同一请求 → 失忆** —— 上游把非浏览器级信任的
+请求按"无状态会话"处理。落地件 `tools/browser_forward.js`
+（8790 全请求浏览器代发）已可用但页面会话稳定性未打磨；
+稳定后切换即可获得原生 2M 窗口 + 上游自动压缩。
+
+### 对 Codex CLI 的配置建议
+
+`~/.codex/config.toml`：
+
+```toml
+model_context_window = 16384   # 走网关时每次请求受单条 15–16k 限制，
+                               # auto-compact 在 ~13k 触发刚好安全
+```
+
+（切换到 browser_forward 原生续接后，可把该值放大到接近 2M，
+把历史与压缩完全交给上游。）
+
+---
 
 ## 沙箱：必需的前置环节（已实测跑通）
 
@@ -366,7 +491,7 @@ Prism 的 AI 助手跑在一个**容器沙箱**里，而且它需要「项目工
 > 顺带调研了 Go 生态的 Yjs 实现（全部实测 `go get`）：
 > `github.com/reearth/ygo` v1.50.0 可用，只 import `crdt`+`sync` 时
 > **只增加 1 个依赖**。其余候选要么模块路径写错、要么需要 cgo+Rust、要么已停更。
-> **但当前不需要它**，所以本项目依赖数依然是 1。
+> **但当前不需要它** —— 沙箱自己完成同步，我们一行 CRDT 代码都不用写。
 
 ### 漏掉注入会怎样（症状极具误导性）
 
@@ -396,8 +521,13 @@ Prism 的 AI 助手跑在一个**容器沙箱**里，而且它需要「项目工
 同步状态按 **(账号, 项目)** 粒度缓存，失效点绑资源令牌的 `expires_at`
 （1 小时）——令牌过期后沙箱读不到项目文件，与其等失败重试不如到点主动重同步。
 
-会话复用键是「system 提示 + 首条 user 消息」的哈希；
-客户端可以用 `X-Oaiprism-Session` 请求头显式指定，复用最稳定。
+会话复用键（`StickyKey`）= 显式 `X-Oaiprism-Session` 头 > 请求体 `user`
+字段 > 首条消息指纹；它同时决定账号粘性、项目复用与（未来的）会话续接。
+客户端用 `X-Oaiprism-Session` 显式指定时复用最稳定。
+
+> 上述延迟数据为 **2026-09-17 在 tlsbridge 通道实测**（首次 14.2s /
+> 复用 5.6s / 同步 2.6–3.3s）；经 browser_forward 实验通道时每请求多
+> ~5–10s（每请求一次浏览器内 fetch + token 现签）。
 
 ### 相关配置
 
@@ -433,6 +563,9 @@ curl http://127.0.0.1:8787/admin/accounts | jq
 
 # 常用指标
 curl -s http://127.0.0.1:8787/metrics | grep -E 'first_delta|facade_runs|poll_rounds'
+
+# Dashboard（账号/会话调试/请求统计）
+# 浏览器打开 http://127.0.0.1:8787/dashboard/
 ```
 
 `readyz` 在没有可用账号时返回 503。这是刻意的：让"漏配凭据"
