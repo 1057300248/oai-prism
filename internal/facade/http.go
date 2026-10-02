@@ -145,6 +145,18 @@ func applyHeaderOverrides(r *http.Request, model, effort *string) (accountID, pr
 	return
 }
 
+// bindLogAccount 把本次运行实际使用的账号写回请求头。
+//
+// 请求日志中间件在 ServeHTTP 返回后才读取 X-Oaiprism-Account ——
+// 而账号是 Runner 在租约阶段才确定的，外层事先不知道。
+// 在这里写回，明细流水里的"处理账号"才是真实路由结果，而不是 "-"。
+// res 可能为 nil（启动即失败，连账号都没租到），此时不写。
+func bindLogAccount(r *http.Request, res *RunResult) {
+	if res != nil && res.AccountID != "" {
+		r.Header.Set(HeaderAccount, res.AccountID)
+	}
+}
+
 // conversationKey 推导会话身份。
 //
 // 推导顺序：

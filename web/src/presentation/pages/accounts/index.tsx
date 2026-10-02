@@ -290,7 +290,7 @@ export const AccountsPage: React.FC = () => {
       style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
       title={
         <Space size="middle">
-          <span style={{ fontWeight: 600 }}>账号与计划池列表</span>
+          <span style={{ fontWeight: 600 }}>账号与计划池</span>
           {credsFile && (
             <Tooltip title={`凭据源: ${credsFile}`}>
               <Text
@@ -381,9 +381,9 @@ export const AccountsPage: React.FC = () => {
             style={{ width: 130 }}
             options={[
               { value: 'all', label: '全部状态' },
-              { value: 'enabled', label: '仅健康活跃' },
-              { value: 'cooldown', label: '仅冷却避让' },
-              { value: 'disabled', label: '仅异常停用' },
+              { value: 'enabled', label: '健康可用' },
+              { value: 'cooldown', label: '冷却中' },
+              { value: 'disabled', label: '已停用' },
             ]}
           />
         </Space>

@@ -98,6 +98,11 @@ body,
   overflow: hidden;
 }
 
+/* 请求明细流水：所有单元格强制单行，禁止自动换行（换行属于显示缺陷） */
+.stat-log .ant-table-cell {
+  white-space: nowrap;
+}
+
 /* 凭据构成标签：紧凑无边距，防止撑破列宽 */
 .cred-tags {
   display: inline-flex;

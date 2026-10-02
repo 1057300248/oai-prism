@@ -170,6 +170,7 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 	}
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
+	bindLogAccount(r, res)
 
 	if runErr != nil {
 		// 响应头已经发出去了，没法再改状态码。
@@ -244,6 +245,7 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 // syncChat 处理非流式返回。
 func (h *Handler) syncChat(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, declaredTools []ChatTool) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
+	bindLogAccount(r, res)
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

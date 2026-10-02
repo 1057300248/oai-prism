@@ -748,17 +748,23 @@ func (w *statusResponseWriter) Flush() {
 
 func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-		isCandidate := strings.HasPrefix(path, "/v1/") ||
-			strings.HasPrefix(path, "/chat/") ||
-			strings.HasPrefix(path, "/responses") ||
-			strings.HasPrefix(path, "/models") ||
-			strings.HasPrefix(path, "/prism/")
-
-		if !isCandidate || s.sqlite == nil {
+		// 明细流水只记录「模型调用」：四个推理入口。
+		// 其余流量（模型清单、管理端、Dashboard、原始反代等）不产生推理，
+		// 不进明细 —— 否则表会被 /v1/models 这类探测请求刷屏，
+		// 且这些请求本就没有模型/账号可言，绑定列永远是 "-"。
+		isInference := false
+		if r.Method == http.MethodPost {
+			switch r.URL.Path {
+			case "/v1/chat/completions", "/v1/completions", "/v1/responses", "/v1/messages":
+				isInference = true
+			}
+		}
+		if !isInference || s.sqlite == nil {
 			next.ServeHTTP(w, r)
 			return
 		}
+
+		path := r.URL.Path
 
 		start := time.Now()
 		var model string

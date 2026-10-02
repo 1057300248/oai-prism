@@ -463,6 +463,10 @@ func (s *SQLiteStore) QueryRequestLogs(filter RequestLogFilter) ([]RequestLogIte
 		}
 		if t, err := time.Parse("2006-01-02 15:04:05", tsStr); err == nil {
 			it.Timestamp = t
+		} else if t, err := time.Parse(time.RFC3339, tsStr); err == nil {
+			// 兼容历史行：早期版本曾以 RFC3339（time.Time 默认序列化）写入，
+			// 当前写入统一为空格格式；读取端两种都认，避免时间列静默变零值。
+			it.Timestamp = t
 		}
 		list = append(list, it)
 	}

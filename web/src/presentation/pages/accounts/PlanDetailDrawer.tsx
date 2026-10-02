@@ -1,5 +1,5 @@
 import React from 'react';
-import { Drawer, Descriptions, Tag, Badge, Space, Alert, Typography, Divider } from 'antd';
+import { Drawer, Descriptions, Tag, Badge, Space, Typography, Divider } from 'antd';
 import {
   CrownOutlined,
   ThunderboltOutlined,
@@ -25,7 +25,7 @@ export const PlanDetailDrawer: React.FC = () => {
       title={
         <Space>
           <CrownOutlined style={{ color: '#faad14' }} />
-          <span>账号计划明细 - {selectedAccount.name}</span>
+          <span>账号详情 - {selectedAccount.name}</span>
         </Space>
       }
       placement="right"
@@ -34,39 +34,31 @@ export const PlanDetailDrawer: React.FC = () => {
       onClose={closeDetailDrawer}
     >
       <Space direction="vertical" size="middle" style={{ width: '100%' }}>
-        <Alert
-          message={`上游计划类型：${(selectedAccount.plan || 'pro').toUpperCase()}`}
-          description={`该账号通过 ${selectedAccount.source} 方式注入，当前由 OAIprism 连接池统一纳管。`}
-          type={selectedAccount.enabled ? 'success' : 'warning'}
-          showIcon
-        />
-
-        <Descriptions title="基本身份元信息" bordered column={1} size="small">
-          <Descriptions.Item label="账号标识 (ID)">{selectedAccount.id}</Descriptions.Item>
-          <Descriptions.Item label="账号名称">{selectedAccount.name}</Descriptions.Item>
+        <Descriptions title="账号信息" bordered column={1} size="small">
+          <Descriptions.Item label="账号 ID">{selectedAccount.id}</Descriptions.Item>
           <Descriptions.Item label="绑定邮箱">
-            {selectedAccount.email || <Text type="secondary">（未公开或从 Cookie 直接继承）</Text>}
+            {selectedAccount.email || <Text type="secondary">未绑定</Text>}
           </Descriptions.Item>
-          <Descriptions.Item label="凭据来源 (Source)">
+          <Descriptions.Item label="凭据来源">
             <Tag color="purple">{selectedAccount.source}</Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="健康调度状态">
+          <Descriptions.Item label="调度状态">
             <Badge
               status={selectedAccount.enabled ? 'success' : 'error'}
-              text={selectedAccount.enabled ? '正常调度' : '已暂停调度'}
+              text={selectedAccount.enabled ? '正常调度' : '已暂停'}
             />
           </Descriptions.Item>
         </Descriptions>
 
         <Divider style={{ margin: '8px 0' }} />
 
-        <Descriptions title="计划与凭据有效期" bordered column={1} size="small">
-          <Descriptions.Item label="计划等级 (Plan)">
+        <Descriptions title="计划与凭据" bordered column={1} size="small">
+          <Descriptions.Item label="计划等级">
             <Tag color="gold" icon={<CrownOutlined />}>
               {(selectedAccount.plan || 'pro').toUpperCase()}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="Token 过期时间">
+          <Descriptions.Item label="Token 到期">
             {selectedAccount.token_expires ? (
               <Space>
                 <ClockCircleOutlined />
@@ -78,10 +70,10 @@ export const PlanDetailDrawer: React.FC = () => {
                 )}
               </Space>
             ) : (
-              <Text type="secondary">静态配置 / 未声明过期时间</Text>
+              <Text type="secondary">无过期时间（静态凭据）</Text>
             )}
           </Descriptions.Item>
-          <Descriptions.Item label="凭据挂载构成">
+          <Descriptions.Item label="凭据构成">
             <Space>
               <Tag icon={selectedAccount.has_access_token ? <CheckCircleOutlined /> : <CloseCircleOutlined />} color={selectedAccount.has_access_token ? 'success' : 'default'}>
                 Access Token
@@ -98,36 +90,36 @@ export const PlanDetailDrawer: React.FC = () => {
 
         <Divider style={{ margin: '8px 0' }} />
 
-        <Descriptions title="实时并发与性能统计" bordered column={2} size="small">
-          <Descriptions.Item label="当前在途请求 (Inflight)">
+        <Descriptions title="运行统计" bordered column={2} size="small">
+          <Descriptions.Item label="在途请求">
             <Text strong style={{ color: selectedAccount.inflight > 0 ? '#1677ff' : '#666' }}>
               {selectedAccount.inflight}
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="最大并发限制 (Max Concurrency)">
+          <Descriptions.Item label="并发上限">
             <Tag color="cyan" icon={<ThunderboltOutlined />}>
-              {selectedAccount.max_concurrency > 0 ? `${selectedAccount.max_concurrency} 槽位` : '不限并发'}
+              {selectedAccount.max_concurrency > 0 ? `${selectedAccount.max_concurrency} 槽位` : '不限'}
             </Tag>
           </Descriptions.Item>
-          <Descriptions.Item label="累计请求量 (Total Requests)">
+          <Descriptions.Item label="累计请求">
             {selectedAccount.total_requests} 次
           </Descriptions.Item>
-          <Descriptions.Item label="失败请求数 (Failures)">
+          <Descriptions.Item label="失败请求">
             <Text type={selectedAccount.failures > 0 ? 'danger' : 'secondary'}>
               {selectedAccount.failures} 次
             </Text>
           </Descriptions.Item>
-          <Descriptions.Item label="连续失败避让计数">
+          <Descriptions.Item label="连续失败">
             {selectedAccount.fail_streak} 次
           </Descriptions.Item>
-          <Descriptions.Item label="避让冷却剩余">
-            {selectedAccount.cooldown_sec > 0 ? `${Math.round(selectedAccount.cooldown_sec)} 秒` : '无冷却'}
+          <Descriptions.Item label="冷却剩余">
+            {selectedAccount.cooldown_sec > 0 ? `${Math.round(selectedAccount.cooldown_sec)} 秒` : '无'}
           </Descriptions.Item>
         </Descriptions>
 
         {selectedAccount.tags && selectedAccount.tags.length > 0 && (
           <div>
-            <Text type="secondary" style={{ fontSize: 12 }}>附加标签 (Tags):</Text>
+            <Text type="secondary" style={{ fontSize: 12 }}>标签</Text>
             <div style={{ marginTop: 4 }}>
               {selectedAccount.tags.map((t, idx) => (
                 <Tag key={idx}>{t}</Tag>

@@ -221,6 +221,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 			return nil
 		}
 		res, runErr := h.runner.Run(r.Context(), runReq, emit)
+	bindLogAccount(r, res)
 
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
@@ -253,6 +254,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 				return nil
 			}
 			res2, runErr2 := h.runner.Run(r.Context(), &retry, emit2)
+	bindLogAccount(r, res2)
 			if runErr2 == nil && res2 != nil {
 				if js2, ok2 := extractExecBlock(sb2.String()); ok2 {
 					js = ensureExecJS(js2)
@@ -330,6 +332,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 	}
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
+	bindLogAccount(r, res)
 	text := ""
 	var usage *prism.Usage
 	if res != nil {
@@ -369,6 +372,7 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 
 func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
+	bindLogAccount(r, res)
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

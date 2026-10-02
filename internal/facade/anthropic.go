@@ -152,6 +152,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, runReq
 	}
 
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
+	bindLogAccount(r, res)
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
 		buf = AppendAnthropicEvent(buf[:0], AnthropicEvent{Type: "error", Text: runErr.Error()})
@@ -177,6 +178,7 @@ func (h *Handler) streamAnthropic(w http.ResponseWriter, r *http.Request, runReq
 
 func (h *Handler) syncAnthropic(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id, publicModel string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
+	bindLogAccount(r, res)
 	if err != nil {
 		status, typ, msg := mapError(err)
 		writeError(w, status, typ, msg)

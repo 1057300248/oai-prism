@@ -149,10 +149,11 @@ export const StatisticsPage: React.FC = () => {
       dataIndex: 'id',
       key: 'id',
       width: 140,
+      ellipsis: { showTitle: true },
       render: (id: string) => (
         <Tooltip title={id}>
-          <Text code style={{ fontSize: 12 }}>
-            {id.length > 14 ? id.slice(0, 14) + '...' : id}
+          <Text code style={{ fontSize: 12, display: 'block', maxWidth: 130, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {id}
           </Text>
         </Tooltip>
       ),
@@ -172,17 +173,15 @@ export const StatisticsPage: React.FC = () => {
       title: '调用模型',
       dataIndex: 'model',
       key: 'model',
-      render: (m: string) => (
-        <Tag color={m.includes('6') ? 'volcano' : 'cyan'}>{m || '默认模型'}</Tag>
-      ),
+      render: (m: string) =>
+        m ? <Tag color={m.includes('6') ? 'volcano' : 'cyan'}>{m}</Tag> : <Text type="secondary">-</Text>,
     },
     {
       title: '处理账号',
       dataIndex: 'accountId',
       key: 'accountId',
-      render: (acc: string) => (
-        <Tag color="geekblue">{acc || '默认池'}</Tag>
-      ),
+      render: (acc: string) =>
+        acc ? <Tag color="geekblue">{acc}</Tag> : <Text type="secondary">-</Text>,
     },
     {
       title: '状态',
@@ -243,13 +242,13 @@ export const StatisticsPage: React.FC = () => {
         <Col xs={24} sm={12} md={6}>
           <Card hoverable>
             <Statistic
-              title="累计真实请求总数"
+              title="累计请求"
               value={summary?.totalRequests || 0}
               prefix={<LineChartOutlined style={{ color: '#1677ff' }} />}
               suffix="次"
             />
             <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
-              真实失败次数: <Text type={summary?.failures ? 'danger' : 'secondary'}>{summary?.failures || 0}</Text>
+              失败 <Text type={summary?.failures ? 'danger' : 'secondary'}>{summary?.failures || 0}</Text> 次
             </div>
           </Card>
         </Col>
@@ -276,7 +275,7 @@ export const StatisticsPage: React.FC = () => {
               suffix="ms"
             />
             <div style={{ marginTop: 8, fontSize: 12, color: '#888' }}>
-              服务已持续运行: {formatUptime(summary?.uptimeSec)}
+              运行时长: {formatUptime(summary?.uptimeSec)}
             </div>
           </Card>
         </Col>
@@ -299,7 +298,7 @@ export const StatisticsPage: React.FC = () => {
       <Row gutter={[16, 16]}>
         <Col xs={24} lg={14}>
           <Card
-            title="真实请求吞吐走势"
+            title="请求吞吐走势"
             extra={
               <Button icon={<ReloadOutlined />} onClick={fetchMetrics} loading={loading}>
                 刷新指标
@@ -311,22 +310,27 @@ export const StatisticsPage: React.FC = () => {
                 <Area {...areaConfig} />
               ) : (
                 <div style={{ textAlign: 'center', paddingTop: 100, color: '#999' }}>
-                  暂无请求数据，发起请求后将在此实时绘制真实曲线
+                  暂无请求数据
                 </div>
               )}
             </div>
           </Card>
         </Col>
         <Col xs={24} lg={10}>
-          <Card title="模型真实调用分布" styles={{ body: { padding: '12px 16px' } }}>
+          <Card
+            title="模型调用分布"
+            styles={{ body: { padding: '12px 16px', height: '100%', display: 'flex', flexDirection: 'column' } }}
+          >
             {activeUsages.length > 0 ? (
-              <Row gutter={8} align="middle">
+              <Row gutter={8} align="middle" style={{ flex: 1, minHeight: 0 }}>
                 {/* 环形图：外部标签与图例全部关闭，信息由右侧列表承担 */}
-                <Col span={11} style={{ height: 280 }}>
-                  <Pie {...pieConfig} />
+                <Col span={11} style={{ height: '100%', display: 'flex', alignItems: 'center' }}>
+                  <div style={{ width: '100%', height: 260 }}>
+                    <Pie {...pieConfig} />
+                  </div>
                 </Col>
                 {/* 紧凑模型列表：取代原独立「模型性能明细」表格（内容重复） */}
-                <Col span={13}>
+                <Col span={13} style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
                   {activeUsages.map((u, i) => (
                     <div
                       key={u.model}
@@ -368,7 +372,7 @@ export const StatisticsPage: React.FC = () => {
               </Row>
             ) : (
               <div style={{ textAlign: 'center', paddingTop: 100, color: '#999' }}>
-                暂无模型调用分布记录
+                暂无调用记录
               </div>
             )}
           </Card>
@@ -380,8 +384,7 @@ export const StatisticsPage: React.FC = () => {
         title={
           <Space wrap>
             <LineChartOutlined style={{ color: '#1677ff' }} />
-            <span>请求明细流水 (SQLite 持久化详细审计)</span>
-            <Tag color="processing">共 {requestLogsTotal} 笔记录</Tag>
+            <span>请求明细流水</span>
           </Space>
         }
         extra={
@@ -421,6 +424,7 @@ export const StatisticsPage: React.FC = () => {
         }
       >
         <Table
+          className="stat-log"
           rowKey="id"
           columns={requestLogColumns}
           dataSource={requestLogs}
@@ -431,7 +435,7 @@ export const StatisticsPage: React.FC = () => {
             total: requestLogsTotal,
             showSizeChanger: true,
             pageSizeOptions: ['10', '20', '50'],
-            showTotal: (total) => `共 ${total} 笔真实请求记录`,
+            showTotal: (total) => `共 ${total} 笔`,
             onChange: (p, ps) => fetchRequestLogs(p, ps),
           }}
         />
