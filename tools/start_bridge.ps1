@@ -1,12 +1,14 @@
 # ============================================================
-# OAIprism 桥一键启动（PowerShell 版）
+# OAIprism 一键启动（PowerShell 版）
 #
 # 与 tools/start_bridge.cmd 等价，但用原生 PowerShell 语法，
 # 便于在受控终端里直接调用（cmd.exe 在部分环境被策略禁用）。
 #
-# 启动两个服务：
-#   8787  OAIprism 网关（Go）
-#   8790  浏览器通道 sidecar（node + 真实 Chrome，穿透 Cloudflare）
+# 启动三个服务（顺序敏感，自下而上）：
+#   8791  Sentinel token oracle（node + 真实 Chrome，只做 SDK.token 签发）
+#   8790  Go TLS 桥（oaiprism tlsbridge：Go 传输 + oracle 签 token）
+#   8787  OAIprism 网关（Go serve：OpenAI/Anthropic 兼容 API + Dashboard）
+# 链路：客户端 → 8787 → 8790 → prism.openai.com（8790 每请求向 8791 要 token）
 # ============================================================
 $ErrorActionPreference = "Continue"
 
@@ -55,13 +57,13 @@ if (Test-Port 8790) {
 } else {
     Write-Host "    等待 oracle 就绪后启动 Go TLS 桥..."
     Start-Sleep -Seconds 25
-    $Exe = "$env:TEMP\oaiprism.exe"
-    if (-not (Test-Path $Exe)) {
-        Write-Host "    本地无二进制，先构建..."
-        Push-Location $Repo
-        go build -o $Exe ./cmd/oaiprism
-        Pop-Location
-    }
+    # 始终从仓库构建：TEMP 里的旧二进制会悄悄落后于代码（曾因此排查过
+    # "改了没生效"的假 bug）。构建很快，不值得省。
+    $Exe = "$Repo\oaiprism.exe"
+    Write-Host "    构建 $Exe ..."
+    Push-Location $Repo
+    go build -o $Exe ./cmd/oaiprism
+    Pop-Location
     Start-Process -FilePath $Exe `
         -ArgumentList @("tlsbridge", "-port", "8790", "-oracle", "http://127.0.0.1:8791", "-accounts", "$Repo\secrets\accounts.json") `
         -WorkingDirectory $Repo `

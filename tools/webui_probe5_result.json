@@ -1,0 +1,208 @@
+{
+ "verdict": "未触界（轮数用尽）",
+ "log": [
+  {
+   "round": 2,
+   "cumulativeEst": 36896,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 3,
+   "cumulativeEst": 62364,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 4,
+   "cumulativeEst": 87845,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 5,
+   "cumulativeEst": 113321,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 6,
+   "cumulativeEst": 138823,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 7,
+   "cumulativeEst": 164322,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 8,
+   "cumulativeEst": 189768,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 9,
+   "cumulativeEst": 215238,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 10,
+   "cumulativeEst": 240683,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 11,
+   "cumulativeEst": 266160,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 12,
+   "cumulativeEst": 291589,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 13,
+   "cumulativeEst": 317079,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 14,
+   "cumulativeEst": 342553,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 15,
+   "cumulativeEst": 368085,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 16,
+   "cumulativeEst": 393574,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 17,
+   "cumulativeEst": 419034,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 18,
+   "cumulativeEst": 444496,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 19,
+   "cumulativeEst": 469981,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 20,
+   "cumulativeEst": 495409,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 21,
+   "cumulativeEst": 520849,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 22,
+   "cumulativeEst": 546294,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 23,
+   "cumulativeEst": 571745,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 24,
+   "cumulativeEst": 597241,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 25,
+   "cumulativeEst": 622709,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 26,
+   "cumulativeEst": 648177,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 27,
+   "cumulativeEst": 673649,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 28,
+   "cumulativeEst": 699125,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 29,
+   "cumulativeEst": 724607,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  },
+  {
+   "round": 30,
+   "cumulativeEst": 750066,
+   "status": "completed",
+   "answer": "桂花酒酿圆子",
+   "alive": true
+  }
+ ]
+}

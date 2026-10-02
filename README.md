@@ -8,11 +8,66 @@ Go 单二进制，零 CGO，无运行时依赖。
 
 ---
 
+## 系统架构
+
+```
+                              ┌──────────────────────────────────────────────┐
+   OpenAI SDK / Codex CLI ──► │  8787  OAIprism 网关（Go 单二进制）           │
+   Anthropic SDK          ──► │  ├─ /v1/chat/completions   OpenAI 门面        │
+   curl / 任意 HTTP 客户端 ──► │  ├─ /v1/responses          Responses 门面     │
+                              │  ├─ /v1/messages           Anthropic 门面     │
+                              │  ├─ /prism/*               原样反代通道       │
+                              │  ├─ /admin/*               管理 API（账号/日志）│
+                              │  ├─ /  + /assets/*         Dashboard（web/dist）│
+                              │  └─ /metrics               Prometheus 指标     │
+                              └───────────────┬──────────────────────────────┘
+                                              │ 调优 HTTP 客户端（强 HTTP/2、
+                                              │ 连接预热、往返 0 拷贝）
+                                              ▼
+                              ┌──────────────────────────────────────────────┐
+                              │  8790  Go TLS 桥（oaiprism tlsbridge）        │
+                              │  ├─ Go 侧：Chrome 系 TLS 指纹传输 + 轮询编排   │
+                              │  └─ 每请求 POST 8791 /token 取一次性 Sentinel │
+                              └───────────────┬──────────────────────────────┘
+                                              │ 带 openai-sentinel-token
+                                              ▼
+                              ┌──────────────────────────────────────────────┐
+                              │  8791  Sentinel token oracle（node + Chrome） │
+                              │  真实页面环境执行 SentinelSDK.token()          │
+                              │  只做签发（~100ms），不转发任何数据面流量       │
+                              └───────────────┬──────────────────────────────┘
+                                              ▼
+                                  prism.openai.com（Cloudflare 之后）
+```
+
+**一次推理的数据流**：客户端 → 8787 门面（协议翻译成内部 start+poll）
+→ 8790 桥（补 Sentinel token、按 Chrome 指纹发请求）→ 上游 start
+→ 8787 轮询 status（经 8790）→ 增量转 SSE 推回客户端 → 收尾写入 usage 估算。
+
+**为什么必须走桥**：Cloudflare 会拦截不带浏览器级信任特征的裸请求；
+8790/8791 组合把"传输指纹"与"反自动化令牌"分开解决 —— oracle 只签发
+（真实页面里跑 SDK），桥承担全部数据面，崩溃面小、可独立重启。
+
+### 端口分配
+
+| 端口 | 服务 | 归属 | 说明 |
+|---|---|---|---|
+| **8787** | OAIprism 网关 | `oaiprism serve` | 对外唯一入口：API + Dashboard + 指标。`0.0.0.0` 可配 |
+| **8790** | Go TLS 桥 | `oaiprism tlsbridge` | 仅本机监听；网关的 `upstream.base_url` 指向它 |
+| **8791** | Sentinel token oracle | `tools/sentinel_oracle.js` | 仅本机监听；只提供 `POST /token` 与 `GET /healthz` |
+| 8787(HTTP) | Dashboard 静态资源 | 网关内置 | `web/dist` 由网关伺服，无需独立端口 |
+
+> 桥模式（`8790`）是生产默认；仅做只读探测时可把 `upstream.base_url`
+> 直连 `https://prism.openai.com`，但没有 Sentinel token 的写操作会被
+> 上游 403 拒绝。详见 `configs/config.example.yaml` 的 upstream 注释。
+
+---
+
 ## 为什么是这个技术栈
 
 | 需求 | 选择 | 理由 |
 |---|---|---|
-| 语言 | Go 1.25 | 流式反代的瓶颈是"连接多、分配少、延迟低"，Go 的 net/http + goroutine 模型恰好命中；单二进制部署，无运行时依赖 |
+| 语言 | Go 1.26 | 流式反代的瓶颈是"连接多、分配少、延迟低"，Go 的 net/http + goroutine 模型恰好命中；单二进制部署，无运行时依赖 |
 | 上游连接 | 标准库 `http.Transport` | 原生支持 HTTP/2 多路复用；`fasthttp` 不支持 HTTP/2 上游，反而更慢 |
 | 缓冲 | `sync.Pool` + `bufio` | 稳态零分配；SSE 逐帧 `Flush` |
 | JSON | 手写编码器 | 热路径上避开反射与 map 分配，单 chunk 编码开销下降一个数量级 |
@@ -59,10 +114,42 @@ go build -o oaiprism.exe ./cmd/oaiprism
 
 ### 3. 启动
 
+生产链路需要**三个服务**（顺序：oracle → 桥 → 网关）。
+
+**一键启动（推荐）**：
+
+```powershell
+tools\start_bridge.ps1     # 或 tools\start_bridge.cmd（cmd 环境）
+tools\stop_bridge.ps1      # 停止三件套（含自动化 Chrome 清理）
+tools\check_bridge.cmd     # codex 报错时先跑这个诊断
+```
+
+脚本行为：检查端口占用 → 缺则从仓库重新构建 `oaiprism.exe` →
+依次拉起 8791 oracle / 8790 桥 / 8787 网关 → 逐一健康检查并打印结果。
+日志在 `%TEMP%`（`oracle.log` / `tlsbridge.log` / `oaiprism_8787.log`）。
+
+> 脚本里的 `REPO` / `NODE` 路径是本机约定，换机器需要改脚本头部三行。
+
+**手动启动（等价，便于排障）**：
+
 ```bash
+go build -o oaiprism.exe ./cmd/oaiprism
+
+# 1) Sentinel oracle（会打开一个 Chrome 窗口，属正常）
+node tools/sentinel_oracle.js auto 8791
+
+# 2) Go TLS 桥
+./oaiprism.exe tlsbridge -port 8790 -oracle http://127.0.0.1:8791 -accounts secrets/accounts.json
+
+# 3) 网关
 cp configs/config.example.yaml configs/config.yaml
 ./oaiprism.exe serve -config configs/config.yaml
 ```
+
+**仅网关模式（离线调试 / 契约测试）**：跳过 8790/8791，直接
+`./oaiprism.exe serve -config configs/config.yaml` —— 只读端点可用，
+需要 Sentinel 的写操作会 403。要完全离线跑，可把上游指向
+`tools/mock_upstream.py` 提供的模拟服务。
 
 没配凭据也能正常启动——服务会打印明确警告，等你把凭据放进去后自动开始工作。
 
@@ -353,10 +440,66 @@ curl -s http://127.0.0.1:8787/metrics | grep -E 'first_delta|facade_runs|poll_ro
 
 ---
 
+## CI/CD 流水线
+
+### 持续集成（`.github/workflows/ci.yml`）
+
+触发：任意分支 push / PR / 手动 `workflow_dispatch`；
+同一 ref 的新提交会取消上一次运行（`concurrency`）。
+
+```
+push / PR
+   │
+   ├─► job: go-check ─────────────────────────────────────────────┐
+   │     1. checkout + setup-go（版本读 go.mod，缓存依赖）          │
+   │     2. go vet ./...            静态检查（含格式化外的疑似问题） │
+   │     3. go test ./...           单元测试（含模拟上游 e2e）      │
+   │     4. go test -race ./...     并发竞态（账号池/SSE/热重载）   │
+   │     5. go build                本机构建                        │
+   │     6. 交叉编译                 linux/amd64 + linux/arm64      │
+   │     7. 上传产物                 bin/oaiprism-linux-*（7 天）   │
+   │                                                                │
+   └─► job: web-check ────────────────────────────────────────────┤
+         1. checkout + pnpm setup + node 22（缓存 pnpm store）     │
+         2. pnpm install --frozen-lockfile（锁文件漂移即失败）     │
+         3. npx tsc --noEmit            Dashboard 类型门禁          │
+         4. pnpm build                  产出 web/dist（供网关伺服）│
+                                                                   ▼
+                                              绿色 = 可发布（进入下方部署）
+```
+
+**本地等价门禁**（提交前必须全绿，与 CI 完全一致）：
+
+```bash
+go vet ./... && go test ./... && go test -race ./...
+cd web && npx tsc --noEmit && pnpm build
+```
+
+`-race` 不是可选项：本项目有账号池、粘性表、SSE 写出、热重载等大量
+并发结构，历史上靠并发测试抓到过越界 panic。
+
+### 持续交付（当前为半自动，无 CD 服务）
+
+单二进制 + 静态 Dashboard 的形态让"发布"退化为**拷贝文件**，
+故未引入 CD 平台，流程如下：
+
+| 阶段 | 动作 | 产物 |
+|---|---|---|
+| ① 构建 | `make build-linux`（或 CI 产物下载） | `bin/oaiprism-linux-amd64` |
+| ② 打包 | 二进制 + `config.example.yaml` + `web/dist` + `tools/sentinel_oracle.js` | 发布目录 / 压缩包 |
+| ③ 部署 | 目标机放二进制与配置；`tools/start_bridge.ps1`（Windows）或等价 systemd unit（Linux） | 三件套运行中 |
+| ④ 验证 | `GET /healthz` → Dashboard `/` → 一次真实推理 | 端到端通关 |
+| ⑤ 回滚 | 保留上一版二进制，替换文件 + 重启（配置零迁移，SQLite 自动向前兼容） | 分钟级 |
+
+> 桥与 oracle 是**有状态外部依赖**（浏览器登录态），因此部署单元是
+> 「网关进程」；桥/oracle 属于运行环境，随机器初始化一次，日常发布不动。
+
+---
+
 ## 目录结构
 
 ```
-cmd/oaiprism/        命令行入口（serve / probe / import / capture-summary）
+cmd/oaiprism/        命令行入口（serve / tlsbridge / probe / import / capture-summary）
 internal/
   config/            配置加载与校验
   creds/             凭据建模、JWT 解析、自动续期（session + OAuth 双路径）
@@ -365,11 +508,23 @@ internal/
   prism/             上游协议客户端 + 宽容解析 + 前缀差分
   sse/               SSE 写出层（池化缓冲、手写 JSON 编码）
   facade/            兼容门面：OpenAI Chat / Responses / Anthropic Messages
+  bridge/            Go TLS 桥（Chrome 系指纹传输 + Sentinel token 编排）
   rawproxy/          原样反代通道
   capture/           抓包录制与协议摘要
   middleware/        恢复、请求 ID、指标、鉴权、限流
   metrics/           零依赖 Prometheus 指标
   server/            组件装配与生命周期
+web/                 Dashboard（React 19 + antd v6 + @ant-design/x），产出 web/dist
+tools/
+  start_bridge.ps1 / .cmd / stop_bridge.ps1 / check_bridge.cmd   一键启停与诊断
+  sentinel_oracle.js  Sentinel token oracle（8791）
+  browser_forward.js  浏览器全请求代发（实验件：原生增量续接通道）
+  probe_*.py / test_*.py / verify_*.py    协议探测与真实链路验证脚本
+  webui_probe*.js     playwright 真实浏览器协议考古（多轮续接/窗口实测）
+  sentinel/           Sentinel 逆向资产（VM 解释器、解码脚本、文档）
+configs/             config.example.yaml（入库）；config.yaml（本地，不入库）
+docs/                协议校准报告、调用链、部署报告、对齐核对
+.github/workflows/   CI（go-check + web-check）
 ```
 
 ---
@@ -394,7 +549,7 @@ go test -bench=. ./internal/...   # 基准
 ### 关于 `internal/prism` 的端点覆盖
 
 该包实现了文档里列出的**全部**端点（projects / project-access /
-conversation-history / lim start+status / sandbox render+render-status /
+conversation-history / llm start+status / sandbox render+render-status /
 project-files upload / PATCH thumbnail）。其中一部分目前只被
 原样反代通道使用，门面路径用不到 —— 这是有意的：
 逆向出来的协议客户端应当完整，否则等你要用某个端点时还得回头补一遍。

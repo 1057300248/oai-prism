@@ -33,7 +33,16 @@ server:
 # 上游（prism.openai.com）
 # ---------------------------------------------------------------------------
 upstream:
-  base_url: https://prism.openai.com
+  # 两种拓扑二选一：
+  #   桥模式（生产推荐、默认）：
+  #       base_url: http://127.0.0.1:8790
+  #       8787 网关 → 8790 tlsbridge（Go 传输 + 8791 oracle 现签 Sentinel）
+  #       → prism.openai.com。Cloudflare 对直连裸请求会拦，桥是必需前置。
+  #   直连模式（仅调试/离线契约测试）：
+  #       base_url: https://prism.openai.com
+  #       无 Sentinel token 时写操作会被上游拒绝（403 Request verification
+  #       failed），只适合只读探测。
+  base_url: http://127.0.0.1:8790
 
   # 单个请求整体超时。0 = 不设上限，由 context 精确控制。
   # 强烈建议保持 0：流式与长轮询都需要"多久都等"。
