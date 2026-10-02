@@ -250,7 +250,7 @@ export const ChatPlaygroundPage: React.FC = () => {
             padding: 12,
             display: 'flex',
             flexDirection: 'column',
-            background: '#fafafa',
+            background: '#fff',
           }}
         >
           <div style={{ marginBottom: 12, fontWeight: 600, color: '#555', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -308,7 +308,13 @@ export const ChatPlaygroundPage: React.FC = () => {
                   </Popconfirm>,
                 ]}
               >
-                <List.Item.Meta title={<span style={{ fontSize: 13 }}>{s.title}</span>} />
+                <List.Item.Meta
+                  title={
+                    <span style={{ fontSize: 13, display: 'block', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {s.title}
+                    </span>
+                  }
+                />
               </List.Item>
             )}
           />

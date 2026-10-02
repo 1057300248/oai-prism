@@ -78,13 +78,34 @@ func (s *oauthSessionStore) put(sess *oauthSession) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for k, old := range s.byState {
-		if time.Since(old.CreatedAt) > oauthSessionTTL {
+		expired := time.Since(old.CreatedAt) > oauthSessionTTL
+		if expired || old.ClientID == sess.ClientID {
+			// 过期清理；同 client 只保留最新一个 pending —— 单活跃会话模式下
+			// 回调不会串到旧会话，新会话直接覆盖旧的。
 			delete(s.byState, k)
 			delete(s.byID, old.ID)
 		}
 	}
 	s.byState[sess.State] = sess
 	s.byID[sess.ID] = sess
+}
+
+// solePending 返回唯一未完成的会话（没有则 nil，多个则 nil）。
+// 回调 state 对不上时的兜底：管理台单用户场景，恰好一个 pending 即可信。
+func (s *oauthSessionStore) solePending() *oauthSession {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var found *oauthSession
+	for _, old := range s.byState {
+		if old.done {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = old
+	}
+	return found
 }
 
 func (s *oauthSessionStore) getByState(state string) *oauthSession {
@@ -247,6 +268,11 @@ func (s *Server) ensureOAuthCallbackListener() (string, error) {
 		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 			state := r.URL.Query().Get("state")
 			sess := oauthSessions.getByState(state)
+			if sess == nil {
+				// 兜底：网关重启会清空内存会话（用户授权期间服务重启的场景），
+				// 此时若恰好只有一个进行中的会话，直接认领它。
+				sess = oauthSessions.solePending()
+			}
 			if sess == nil {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				_, _ = w.Write([]byte(oauthResultHTML("state 校验失败",

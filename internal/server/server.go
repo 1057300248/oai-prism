@@ -337,8 +337,12 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 	// redirect_uri 若指向网关自身（http://<host>:<port>/admin/oauth/callback）
 	// 则走这个路由；指向独立本地端口时由临时监听器接（见 handleOAuthBegin）。
 	mux.HandleFunc("GET /admin/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
-		sessID := r.URL.Query().Get("state")
-		sess := oauthSessions.getByID(sessID)
+		state := r.URL.Query().Get("state")
+		sess := oauthSessions.getByState(state)
+		if sess == nil {
+			// 兜底：网关重启清空内存会话时，认领唯一进行中的授权
+			sess = oauthSessions.solePending()
+		}
 		if sess == nil {
 			writeAdminErr(w, http.StatusBadRequest, "会话不存在或已过期")
 			return
