@@ -46,7 +46,7 @@ func TestRecorder_RedactsSensitiveHeaders(t *testing.T) {
 		"X-Api-Key":     {"sk-secret"},
 		"X-Normal":      {"keep"},
 	}
-	r.RecordRequest(prism.Meta{Method: "POST", Path: "/api/lim/response_with_tools_start", Started: time.Now()},
+	r.RecordRequest(prism.Meta{Method: "POST", Path: "/api/llm/response_with_tools_start", Started: time.Now()},
 		hdr, []byte(`{"model":"gpt-5"}`))
 	r.Close()
 
@@ -192,11 +192,11 @@ func TestReplayFile_BadLine(t *testing.T) {
 // 这是本包最实用的功能：把真实抓包变成可以直接填进 YAML 的字段清单。
 func TestSummarize(t *testing.T) {
 	recs := []Record{
-		{Direction: "request", Method: "POST", Path: "/api/lim/response_with_tools_start",
+		{Direction: "request", Method: "POST", Path: "/api/llm/response_with_tools_start",
 			Body: `{"model":"gpt-5","messages":[],"project_id":"abc"}`},
-		{Direction: "response", Method: "POST", Path: "/api/lim/response_with_tools_start",
+		{Direction: "response", Method: "POST", Path: "/api/llm/response_with_tools_start",
 			Status: 200, Body: `{"id":"resp-1","status":"in_progress"}`},
-		{Direction: "response", Method: "POST", Path: "/api/lim/response_with_tools_status",
+		{Direction: "response", Method: "POST", Path: "/api/llm/response_with_tools_status",
 			Status: 200, Body: `{"response_id":"resp-1","done":true,"output":{"text":"hi"}}`},
 		// 带 UUID 的路径应当被归一化，避免同一端点产生多条摘要。
 		{Direction: "response", Method: "PATCH",
@@ -206,8 +206,8 @@ func TestSummarize(t *testing.T) {
 	out := Summarize(recs)
 
 	for _, want := range []string{
-		"POST /api/lim/response_with_tools_start",
-		"POST /api/lim/response_with_tools_status",
+		"POST /api/llm/response_with_tools_start",
+		"POST /api/llm/response_with_tools_status",
 		"PATCH /api/projects/{id}/thumbnail",
 		"model",
 		"messages",
@@ -241,7 +241,7 @@ func TestRecorder_WritesJSONL(t *testing.T) {
 	dir := t.TempDir()
 	r := New(Options{Enabled: true, Dir: dir, Redact: true, Sample: 1}, nil)
 	r.RecordResponse(prism.Meta{
-		Method: "POST", Path: "/api/lim/response_with_tools_status",
+		Method: "POST", Path: "/api/llm/response_with_tools_status",
 		Status: 200, Started: time.Now(), Duration: 150 * time.Millisecond,
 	}, http.Header{"Content-Type": {"application/json"}}, []byte(`{"ok":true}`))
 	r.Close()

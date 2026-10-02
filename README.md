@@ -311,18 +311,7 @@ curl http://127.0.0.1:8787/prism/api/auth/session
 > 三处独立证据交叉验证（上游错误信息、前端 bundle 源码、可复现的路径对照），
 > 不是推断。
 
-### 关键路径：是 `llm` 不是 `lim`
-
-早期那版逆向文档写成 `/api/lim/response_with_tools_start`，**是笔误**：
-
-| 路径 | 结果 |
-|---|---|
-| `/api/llm/response_with_tools_start` | JSON API（假 token 得到 401，说明路由与鉴权都正常） |
-| `/api/lim/response_with_tools_start` | Next.js 的 404 HTML 页（和随便编的路径完全一样） |
-
-决定性证据是前端源码：`grep "api/lim" *.js` 命中 **0** 次，
-而 `/api/llm/response_with_tools_{start,status,stop}` 三个全在。
-E2E 测试里有一条断言：一旦有请求打到 `/api/lim/`，测试立刻失败。
+推理端点路径：`/api/llm/response_with_tools_{start,status,stop}`。
 
 ### 协议形状
 

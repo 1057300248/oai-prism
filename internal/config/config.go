@@ -526,7 +526,6 @@ func Default() *Config {
 				"/api/project-access",
 				"/api/codex/conversation-history",
 				"/api/llm/",
-				"/api/lim/",
 				"/api/backend/",
 				"/api/y",
 				"/s/sandboxes/",
@@ -569,10 +568,8 @@ func Default() *Config {
 //     fetch("/api/llm/response_with_tools_stop", {body: JSON.stringify({
 //     request_id, conversation_id, turn_state })})
 //
-// 关于路径是 lim 还是 llm：**是 llm**。
-// 早期那版逆向文档写成 /api/lim/ 是笔误 —— 实测 /api/lim/... 返回的是
-// Next.js 的 404 HTML 页面（和随机瞎编的路径返回的东西一模一样），
-// 而 /api/llm/... 返回的是真实的 JSON 校验错误。
+// 推理端点路径是 /api/llm/response_with_tools_*（实测校准，
+// 见 docs/协议校准报告.md）。
 func defaultSchema() SchemaConfig {
 	return SchemaConfig{
 		StartPath:  "/api/llm/response_with_tools_start",

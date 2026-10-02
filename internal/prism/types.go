@@ -16,10 +16,7 @@ import (
 
 // Endpoint 常量。集中在一处，方便对照真实报文。
 //
-// 注意路径里的 llm：早期逆向文档写的 /api/lim/ 是笔误。
-// 实测 /api/lim/... 返回的是 Next.js 的 404 HTML 页面
-// （与随机不存在的路径返回内容完全一致），
-// 而 /api/llm/... 返回的是真实的 JSON 校验错误。
+// 推理端点路径为 /api/llm/response_with_tools_*（实测校准）。
 const (
 	PathProjects            = "/api/projects"
 	PathProjectAccess       = "/api/project-access"

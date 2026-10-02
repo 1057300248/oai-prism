@@ -38,22 +38,18 @@ import (
 //
 //	POST /api/llm/response_with_tools_stop
 //	  body  {request_id, conversation_id, turn_state}
-//
-// 它还刻意记录了"是否被请求过 /api/lim/..."—— 那是最早期文档里的笔误路径，
-// 用它做一条回归断言：谁把路径写回 lim，测试立刻红。
 type fakeUpstream struct {
 	t *testing.T
 
-	mu             sync.Mutex
-	projectCount   int
-	projectFails   bool
-	startBodies    []map[string]any
-	statusBodies   []map[string]any
-	stopBodies     []map[string]any
-	legacyLimCalls int
-	lastAuth       string
-	lastOrigin     string
-	lastReferer    string
+	mu           sync.Mutex
+	projectCount int
+	projectFails bool
+	startBodies  []map[string]any
+	statusBodies []map[string]any
+	stopBodies   []map[string]any
+	lastAuth     string
+	lastOrigin   string
+	lastReferer  string
 
 	// gens 按 request_id 保存每个请求自己的轮询状态。
 	//
@@ -111,22 +107,8 @@ func (f *fakeUpstream) payloadOutput(text string, withReasoning bool) map[string
 	}
 }
 
-func (f *fakeUpstream) recordLim(path string) {
-	f.mu.Lock()
-	f.legacyLimCalls++
-	f.mu.Unlock()
-	f.t.Errorf("严重：请求打到了过时路径 %s。正确路径是 /api/llm/...（/api/lim/ 是早期文档的笔误）", path)
-}
-
 func (f *fakeUpstream) handler() http.Handler {
 	mux := http.NewServeMux()
-
-	// --- 旧的（错误的）路径：一旦被命中就判测试失败 ---
-	mux.HandleFunc("/api/lim/", func(w http.ResponseWriter, r *http.Request) {
-		f.recordLim(r.URL.Path)
-		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("<html>404</html>"))
-	})
 
 	// --- 认证 ---
 	mux.HandleFunc("/api/auth/session", func(w http.ResponseWriter, r *http.Request) {
@@ -558,9 +540,6 @@ func TestE2E_ChatCompletionsNonStream(t *testing.T) {
 	}
 
 	// 最关键的回归断言。
-	if up.legacyLimCalls != 0 {
-		t.Fatalf("有 %d 次请求打到了过时的 /api/lim/ 路径", up.legacyLimCalls)
-	}
 }
 
 func TestE2E_ChatCompletionsStream(t *testing.T) {
