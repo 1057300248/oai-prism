@@ -1,7 +1,11 @@
 # 编译产物
 bin/
 *.exe
-oaiprism
+# 仅忽略仓库根目录的 Linux 二进制 —— 必须带前导斜杠：
+# 无斜杠的 `oaiprism` 会连 cmd/oaiprism/ 源码目录一起忽略
+# （2026-10-03 发现：cmd 源码从未入库，CI 检出后编译失败）
+/oaiprism
+oaiprism.exe~
 
 # 本地配置与凭据 —— 绝对不能提交
 configs/config.yaml
