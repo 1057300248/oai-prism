@@ -65,7 +65,11 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 	}
 	sqliteStore, sqliteErr := account.NewSQLiteStore(dbPath, log)
 	if sqliteErr != nil {
-		log.Warn("初始化 SQLite 账号存储失败，仅使用文件模式", "err", sqliteErr)
+		// Error 级：SQLite 是 Dashboard 的持久化后端（账号/会话/请求日志），
+		// 失败意味着这些功能全部退化为内存态。降级可用，但必须显眼 ——
+		// 静默 Warn 曾让 CI 上的初始化失败被忽略（2026-10-03）。
+		log.Error("初始化 SQLite 账号存储失败，退化为仅文件模式",
+			"path", dbPath, "err", sqliteErr)
 	} else {
 		// 自动迁移已有账号至 SQLite，实现开箱即用无缝接管
 		mergedInit := mergeAccounts(cfg.Creds.Accounts, fileAccounts)
@@ -843,6 +847,14 @@ func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
 		}
 
 		go func() {
+			// s.sqlite 可能是 nil（初始化失败时仅告警不阻断）。
+			// 这里必须判空：nil 接收者会让方法内解引用崩掉整个进程，
+			// 而且是在后台 goroutine 里 —— 一个请求日志就能让服务下线。
+			// （2026-10-03 CI 在 Linux 上实测踩中；SQLiteStore 内部
+			// 也有 ready() 防御，这里是第一道闸。）
+			if s.sqlite == nil {
+				return
+			}
 			_ = s.sqlite.RecordRequestLog(item)
 		}()
 	})

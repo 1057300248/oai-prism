@@ -3,6 +3,7 @@ package account
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -22,6 +23,14 @@ type SQLiteStore struct {
 	log  *slog.Logger
 	mu   sync.Mutex
 }
+
+// errSQLiteUnavailable 表示 SQLite 存储未就绪（初始化失败或零值实例）。
+// 所有公开方法在这种情况下返回该错误而不是 panic —— 记录请求日志发生在
+// 后台 goroutine 里，nil 解引用会直接崩掉整个进程（2026-10-03 CI 实证）。
+var errSQLiteUnavailable = errors.New("sqlite 存储不可用（初始化失败）")
+
+// ready 判断实例是否可用（同时防御 nil 接收者与 db 未打开的零值实例）。
+func (s *SQLiteStore) ready() bool { return s != nil && s.db != nil }
 
 // NewSQLiteStore 打开或创建 SQLite 数据库。
 func NewSQLiteStore(dbPath string, log *slog.Logger) (*SQLiteStore, error) {
@@ -59,6 +68,9 @@ func NewSQLiteStore(dbPath string, log *slog.Logger) (*SQLiteStore, error) {
 
 // initSchema 创建 accounts、request_logs、chat_sessions 和 chat_messages 表。
 func (s *SQLiteStore) initSchema() error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	schema := `
 	CREATE TABLE IF NOT EXISTS accounts (
 		id TEXT PRIMARY KEY,
@@ -136,6 +148,9 @@ func (s *SQLiteStore) initSchema() error {
 
 // Close 关闭数据库。
 func (s *SQLiteStore) Close() error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.db != nil {
@@ -148,11 +163,17 @@ func (s *SQLiteStore) Close() error {
 
 // Path 返回数据库路径。
 func (s *SQLiteStore) Path() string {
+	if s == nil {
+		return ""
+	}
 	return s.path
 }
 
 // Load 读取 SQLite 中所有已保存的账号。
 func (s *SQLiteStore) Load() ([]config.AccountConfig, error) {
+	if !s.ready() {
+		return nil, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -194,6 +215,9 @@ func (s *SQLiteStore) Load() ([]config.AccountConfig, error) {
 
 // SaveAccount 插入或更新单账号 (Create or Update)。
 func (s *SQLiteStore) SaveAccount(a config.AccountConfig) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -250,6 +274,9 @@ func (s *SQLiteStore) SaveAccount(a config.AccountConfig) error {
 
 // DeleteAccount 从 SQLite 中物理删除账号 (Delete)。
 func (s *SQLiteStore) DeleteAccount(id string) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -266,6 +293,9 @@ func (s *SQLiteStore) DeleteAccount(id string) error {
 
 // MigrateIfEmpty 如果 SQLite 为空，自动把现有列表迁移进来。
 func (s *SQLiteStore) MigrateIfEmpty(existing []config.AccountConfig) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	var count int
 	_ = s.db.QueryRow("SELECT COUNT(*) FROM accounts").Scan(&count)
@@ -346,6 +376,9 @@ type AggregatedStats struct {
 
 // RecordRequestLog 将一笔真实请求记录持久化至 SQLite。
 func (s *SQLiteStore) RecordRequestLog(item RequestLogItem) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -383,6 +416,9 @@ func (s *SQLiteStore) RecordRequestLog(item RequestLogItem) error {
 
 // QueryRequestLogs 分页查询请求流水明细。
 func (s *SQLiteStore) QueryRequestLogs(filter RequestLogFilter) ([]RequestLogItem, int, error) {
+	if !s.ready() {
+		return nil, 0, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -476,6 +512,9 @@ func (s *SQLiteStore) QueryRequestLogs(filter RequestLogFilter) ([]RequestLogIte
 
 // GetAggregatedStats 基于 SQLite 真实请求明细计算真实统计指标。
 func (s *SQLiteStore) GetAggregatedStats() (*AggregatedStats, error) {
+	if !s.ready() {
+		return nil, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -595,6 +634,9 @@ type ChatMessageRecord struct {
 
 // ListChatSessions 查询所有持久化调试会话。
 func (s *SQLiteStore) ListChatSessions() ([]ChatSessionRecord, error) {
+	if !s.ready() {
+		return nil, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -628,6 +670,9 @@ func (s *SQLiteStore) ListChatSessions() ([]ChatSessionRecord, error) {
 
 // SaveChatSession 保存或更新会话。
 func (s *SQLiteStore) SaveChatSession(sess ChatSessionRecord) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -646,6 +691,9 @@ func (s *SQLiteStore) SaveChatSession(sess ChatSessionRecord) error {
 
 // DeleteChatSession 删除会话及级联消息。
 func (s *SQLiteStore) DeleteChatSession(id string) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -656,6 +704,9 @@ func (s *SQLiteStore) DeleteChatSession(id string) error {
 
 // ListChatMessages 获取会话的消息历史。
 func (s *SQLiteStore) ListChatMessages(sessionID string) ([]ChatMessageRecord, error) {
+	if !s.ready() {
+		return nil, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -687,6 +738,9 @@ func (s *SQLiteStore) ListChatMessages(sessionID string) ([]ChatMessageRecord, e
 
 // SaveChatMessage 保存一条消息。
 func (s *SQLiteStore) SaveChatMessage(m ChatMessageRecord) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -722,6 +776,9 @@ type APIKeyItem struct {
 
 // ListAPIKeys 列出所有已授权的 API Keys。
 func (s *SQLiteStore) ListAPIKeys() ([]APIKeyItem, error) {
+	if !s.ready() {
+		return nil, errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -752,6 +809,9 @@ func (s *SQLiteStore) ListAPIKeys() ([]APIKeyItem, error) {
 
 // SaveAPIKey 保存新的 API Key。
 func (s *SQLiteStore) SaveAPIKey(item APIKeyItem) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -773,6 +833,9 @@ func (s *SQLiteStore) SaveAPIKey(item APIKeyItem) error {
 
 // DeleteAPIKey 删除指定的 API Key。
 func (s *SQLiteStore) DeleteAPIKey(key string) error {
+	if !s.ready() {
+		return errSQLiteUnavailable
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
