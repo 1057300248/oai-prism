@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Modal, Tabs, Input, Upload, message, Typography, Space, Button, Alert } from 'antd';
+import { Alert, Modal, Tabs, Input, Upload, message, Typography, Space, Button } from 'antd';
 import {
   InboxOutlined,
   KeyOutlined,
@@ -144,6 +144,7 @@ const OAuthImportPane: React.FC<{ onDone: () => void }> = ({ onDone }) => {
   );
 };
 
+
 export const AccountImportModal: React.FC = () => {
   const { importModalOpen, setImportModalOpen, importAccounts, fetchAccounts } = useAccountStore();
   const [activeTab, setActiveTab] = useState('text');
@@ -248,7 +249,7 @@ export const AccountImportModal: React.FC = () => {
       width={600}
       okText="确认导入"
       cancelText="取消"
-      okButtonProps={activeTab !== 'text' ? { style: { display: 'none' } } : undefined}
+      okButtonProps={activeTab === 'text' ? undefined : { style: { display: 'none' } }}
     >
       <Tabs activeKey={activeTab} onChange={setActiveTab} items={items} />
     </Modal>

@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Avatar, Button, Card, Dropdown, Space, Tag, Typography, Upload, message } from 'antd';
+import { Avatar, Button, Card, Dropdown, Empty, Input, Modal, Pagination, Space, Typography, Upload, message } from 'antd';
 import {
   RobotOutlined,
   UserOutlined,
@@ -13,7 +13,12 @@ import {
   CheckOutlined,
   PaperClipOutlined,
   CloseOutlined,
+  EditOutlined,
+  DeleteOutlined,
 } from '@ant-design/icons';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
+import rehypeRaw from 'rehype-raw';
 import { Bubble, Sender, ThoughtChain, Conversations, Prompts } from '@ant-design/x';
 import type { ReasoningEffort } from '../../../domain/chat/entity';
 import { effortsForModel } from '../../../domain/modelFilter';
@@ -42,6 +47,8 @@ export const ChatPlaygroundPage: React.FC = () => {
     init,
     selectSession,
     createNewSession,
+    deleteSession,
+    renameSession,
     setModel,
     setReasoningEffort,
     sendMessage,
@@ -50,6 +57,11 @@ export const ChatPlaygroundPage: React.FC = () => {
   const [input, setInput] = useState('');
   const [attachments, setAttachments] = useState<{ name: string; dataUrl: string }[]>([]);
   const msgListRef = useRef<HTMLDivElement>(null);
+
+  // 会话列表分页 + 重命名
+  const [convPage, setConvPage] = useState(1);
+  const convPageSize = 8;
+  const [renaming, setRenaming] = useState<{ id: string; title: string } | null>(null);
 
   useEffect(() => {
     init();
@@ -110,10 +122,26 @@ export const ChatPlaygroundPage: React.FC = () => {
     },
   ];
 
-  // 会话列表转换
-  const conversationItems = sessions.map((s) => ({
+  // 会话列表：标准 CRUD（悬停菜单：重命名/删除）+ 前端分页
+  const convPageCount = Math.max(1, Math.ceil(sessions.length / convPageSize));
+  const safeConvPage = Math.min(convPage, convPageCount);
+  const pagedSessions = sessions.slice((safeConvPage - 1) * convPageSize, safeConvPage * convPageSize);
+  const conversationItems = pagedSessions.map((s) => ({
     key: s.id,
     label: s.title,
+    menu: () => ({
+      items: [
+        { key: 'rename', label: '重命名', icon: <EditOutlined /> },
+        { key: 'delete', label: '删除', icon: <DeleteOutlined />, danger: true },
+      ],
+      onClick: ({ key }: { key: string }) => {
+        if (key === 'delete') {
+          deleteSession(s.id);
+        } else if (key === 'rename') {
+          setRenaming({ id: s.id, title: s.title });
+        }
+      },
+    }),
   }));
 
   // Bubble 列表转换
@@ -162,9 +190,19 @@ export const ChatPlaygroundPage: React.FC = () => {
               />
             </div>
           )}
-          <div style={{ whiteSpace: 'pre-wrap', fontSize: 14 }}>
-            {m.content || (m.status === 'loading' ? '正在思考生成中...' : '')}
-          </div>
+          {isUser ? (
+            <div style={{ whiteSpace: 'pre-wrap', fontSize: 14 }}>{m.content}</div>
+          ) : (
+            <div className="md-body">
+              {m.content ? (
+                <ReactMarkdown remarkPlugins={[remarkGfm]} rehypePlugins={[rehypeRaw]}>
+                  {m.content}
+                </ReactMarkdown>
+              ) : m.status === 'loading' ? (
+                '正在思考生成中...'
+              ) : null}
+            </div>
+          )}
         </div>
       ),
       loading: m.status === 'loading' && !m.content && !m.reasoning,
@@ -209,12 +247,9 @@ export const ChatPlaygroundPage: React.FC = () => {
       }}
       style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
       title={
-        <Space size="middle">
-          <Space size="small">
-            <RobotOutlined style={{ color: '#1677ff' }} />
-            <span style={{ fontWeight: 600 }}>Codex AI 模型调试控制台</span>
-          </Space>
-          <Tag color="cyan">SQLite 持久化</Tag>
+        <Space size="small">
+          <RobotOutlined style={{ color: '#1677ff' }} />
+          <span style={{ fontWeight: 600 }}>调试控制台</span>
         </Space>
       }
       extra={
@@ -224,26 +259,43 @@ export const ChatPlaygroundPage: React.FC = () => {
       }
     >
       <div style={{ flex: 1, minHeight: 0, display: 'flex' }}>
-        {/* 左侧会话抽屉列表（使用官方 Conversations 组件） */}
+        {/* 左侧会话列表：标准 CRUD（重命名/删除菜单）+ 分页 */}
         <div
           style={{
             width: 240,
             flexShrink: 0,
             borderRight: '1px solid #f0f0f0',
             padding: 12,
-            overflowY: 'auto',
+            display: 'flex',
+            flexDirection: 'column',
             background: '#fafafa',
           }}
         >
           <div style={{ marginBottom: 12, fontWeight: 600, color: '#555', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-            <span><BulbOutlined /> 调试会话列表</span>
+            <span><BulbOutlined /> 会话列表</span>
             <Text type="secondary" style={{ fontSize: 12 }}>共 {sessions.length} 个</Text>
           </div>
-          <Conversations
-            items={conversationItems}
-            activeKey={currentSessionId || undefined}
-            onActiveChange={(key) => selectSession(key)}
-          />
+          <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
+            {conversationItems.length > 0 ? (
+              <Conversations
+                items={conversationItems}
+                activeKey={currentSessionId || undefined}
+                onActiveChange={(key) => selectSession(key)}
+              />
+            ) : (
+              <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无会话" style={{ marginTop: 32 }} />
+            )}
+          </div>
+          {sessions.length > convPageSize && (
+            <Pagination
+              size="small"
+              current={safeConvPage}
+              pageSize={convPageSize}
+              total={sessions.length}
+              onChange={(pg) => setConvPage(pg)}
+              style={{ marginTop: 8, textAlign: 'center' }}
+            />
+          )}
         </div>
 
         {/* 右侧对话主体区（官方 Bubble.List + Sender） */}
@@ -327,6 +379,27 @@ export const ChatPlaygroundPage: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <Modal
+        title="重命名会话"
+        open={Boolean(renaming)}
+        onOk={() => {
+          if (renaming) renameSession(renaming.id, renaming.title);
+          setRenaming(null);
+        }}
+        onCancel={() => setRenaming(null)}
+        okText="保存"
+        cancelText="取消"
+        width={420}
+        destroyOnHidden
+      >
+        <Input
+          value={renaming?.title || ''}
+          onChange={(e) => setRenaming((prev) => (prev ? { ...prev, title: e.target.value } : prev))}
+          placeholder="会话名称"
+          autoFocus
+        />
+      </Modal>
     </Card>
   );
 };

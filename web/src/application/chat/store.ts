@@ -19,6 +19,7 @@ interface ChatState {
   selectSession: (id: string) => void;
   createNewSession: () => void;
   deleteSession: (id: string) => Promise<void>;
+  renameSession: (id: string, title: string) => void;
   setModel: (model: string) => void;
   setReasoningEffort: (effort: ReasoningEffort) => void;
   sendMessage: (text: string, attachments?: ChatAttachment[]) => Promise<void>;
@@ -76,6 +77,17 @@ export const useChatStore = create<ChatState>((set, get) => ({
     const sessions = get().sessions.filter((s) => s.id !== id);
     const nextId = sessions[0]?.id || null;
     set({ sessions, currentSessionId: nextId });
+  },
+
+  renameSession: (id: string, title: string) => {
+    const trimmed = title.trim();
+    if (!trimmed) return;
+    const sessions = get().sessions.map((s) =>
+      s.id === id ? { ...s, title: trimmed, updatedAt: new Date().toISOString() } : s,
+    );
+    set({ sessions });
+    const updated = sessions.find((s) => s.id === id);
+    if (updated) repo.saveSession(updated);
   },
 
   setModel: (model: string) => {

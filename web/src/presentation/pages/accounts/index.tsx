@@ -36,7 +36,6 @@ export const AccountsPage: React.FC = () => {
   const {
     accounts,
     loading,
-    credsFile,
     fetchAccounts,
     reloadPool,
     refreshAccount,
@@ -101,10 +100,10 @@ export const AccountsPage: React.FC = () => {
       dataIndex: 'name',
       key: 'name',
       width: 220,
-      render: (text, record) => (
+      render: (_, record) => (
         <Space orientation="horizontal" size="small">
-          <Tooltip title={`账号 ID: ${record.id}`}>
-            <Text strong style={{ cursor: 'default' }}>{text}</Text>
+          <Tooltip title={`名称: ${record.name}${record.email ? ' | 邮箱: ' + record.email : ''}`}>
+            <Text strong style={{ cursor: 'default' }}>{record.id}</Text>
           </Tooltip>
           <Tag color={record.source === 'oauth' ? 'purple' : 'default'} style={{ fontSize: 11 }}>
             {record.source}
@@ -287,30 +286,7 @@ export const AccountsPage: React.FC = () => {
         body: { padding: '16px 20px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' },
       }}
       style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', width: '100%' }}
-      title={
-        <Space size="middle">
-          <span style={{ fontWeight: 600 }}>账号与计划池</span>
-          {credsFile && (
-            <Tooltip title={`凭据源: ${credsFile}`}>
-              <Text
-                type="secondary"
-                style={{
-                  fontSize: 12,
-                  fontWeight: 'normal',
-                  maxWidth: 340,
-                  overflow: 'hidden',
-                  textOverflow: 'ellipsis',
-                  whiteSpace: 'nowrap',
-                  display: 'inline-block',
-                  verticalAlign: 'middle',
-                }}
-              >
-                凭据源: {credsFile}
-              </Text>
-            </Tooltip>
-          )}
-        </Space>
-      }
+      title={<span style={{ fontWeight: 600 }}>账号与计划池</span>}
       extra={
         <Space>
           <Button

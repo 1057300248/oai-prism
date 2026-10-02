@@ -326,7 +326,10 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 		})
 	})
 
-	// 官方 OAuth 授权导入：浏览器走 auth.openai.com 官方授权页，
+	// 官方 OAuth 授权导入（纯 Go，零浏览器依赖）：
+	// 后端生成 PKCE 授权 URL → 用户自己的浏览器打开授权页登录（CF 对真人不拦）
+	// → 前端把回调 code/state 传回 → 后端 PKCE 换 token 入库。
+	// 同 sub2api 的 GenerateAuthURL + ExchangeCode 模式。
 	// 本地回调接 code，PKCE 换 token 后直接入库（详 OAuth 流程见 oauth_admin.go）。
 	mux.HandleFunc("POST /admin/oauth/begin", s.handleOAuthBegin)
 	mux.HandleFunc("GET /admin/oauth/status", s.handleOAuthStatus)

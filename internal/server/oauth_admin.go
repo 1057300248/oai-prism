@@ -15,9 +15,12 @@ package server
 // 用户多次点击"打开授权页"会产生多个并发会话，若监听器绑定单一会话，
 // 后完成的会话会被先前的会话错误校验（state 不匹配）。
 //
-// 品牌与体系：导入固定用 Prism 的 client（app_jqKb52JverFFcl5GP4axT8QY）——
-// 授权页显示 Prism，且换出的 refresh_token 与该 client 绑定，
-// 账号上记录 oauth_client_id，刷新时逐账号使用，避免全局混用。
+// client 取凭据配置（configs 的 oauth_client_id，默认 Codex CLI 的
+// app_EMoamEEZ73f0CkXaXp7hrann）：localhost:1455 回调在该 client 白名单内
+// （sub2api / Codex CLI 验证过）。Prism 自家的 client 不开放 authorize 的
+// 本地回调 —— 实测返回 invalid_authorize_request，故不用。
+// 换出的 refresh_token 与该 client 绑定，账号上记录 oauth_client_id，
+// 刷新时逐账号使用，避免全局混用。
 
 import (
 	"crypto/rand"
@@ -41,10 +44,7 @@ const (
 	oauthAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	oauthTokenURL     = "https://auth.openai.com/oauth/token"
 	oauthScope        = "openid profile email offline_access"
-	oauthSessionTTL   = 30 * time.Minute
-	// 官方授权页的品牌与回调白名单都属于 Prism 的 client；
-	// Codex CLI 的 client 品牌是 Codex/ChatGPT，不是本产品。
-	oauthImportClientID = "app_jqKb52JverFFcl5GP4axT8QY"
+	oauthSessionTTL = 30 * time.Minute
 )
 
 // oauthSession 一次授权流程的全部状态。
@@ -285,7 +285,12 @@ func (s *Server) handleOAuthBegin(w http.ResponseWriter, r *http.Request) {
 
 	clientID := strings.TrimSpace(body.ClientID)
 	if clientID == "" {
-		clientID = oauthImportClientID
+		// 凭据配置的 oauth_client_id 是唯一真相源（与 refresh 流程同 client，
+		// 换出的 token 体系与存量账号一致）
+		clientID = s.cfg.Creds.OAuthClientID
+	}
+	if clientID == "" {
+		clientID = config.DefaultOAuthClientID
 	}
 
 	// 本地回调监听器（单例）；端口被占则降级为网关自身的回调路由。

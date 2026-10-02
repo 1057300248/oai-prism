@@ -236,7 +236,7 @@ export const MainLayout: React.FC<MainLayoutProps> = ({
               }}
               placement="bottomRight"
             >
-              <Space style={{ cursor: 'pointer', padding: '2px 8px', borderRadius: 4, background: '#fafafa', border: '1px solid #f0f0f0' }}>
+              <Space style={{ cursor: 'pointer' }}>
                 <Avatar size="small" icon={<UserOutlined />} style={{ backgroundColor: '#1677ff' }} />
                 <Text style={{ fontSize: 13, fontWeight: 500 }}>管理员</Text>
               </Space>

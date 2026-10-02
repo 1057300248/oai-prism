@@ -119,3 +119,92 @@ body,
   padding: 0 5px;
   border-radius: 4px;
 }
+
+/* ------------------------------------------------------------------
+   Chat Markdown 渲染体：代码块/表格/列表的排版细节
+   ------------------------------------------------------------------ */
+.md-body {
+  font-size: 14px;
+  line-height: 1.65;
+  word-break: break-word;
+}
+
+.md-body p {
+  margin: 0 0 8px;
+}
+
+.md-body p:last-child {
+  margin-bottom: 0;
+}
+
+.md-body pre {
+  background: #f6f8fa;
+  border: 1px solid #eaecef;
+  border-radius: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+
+.md-body code {
+  font-family: 'Cascadia Code', Consolas, 'Courier New', monospace;
+  font-size: 13px;
+}
+
+.md-body pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.md-body :not(pre) > code {
+  background: #f0f2f5;
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+
+.md-body table {
+  border-collapse: collapse;
+  margin: 8px 0;
+  width: 100%;
+}
+
+.md-body th,
+.md-body td {
+  border: 1px solid #e8e8e8;
+  padding: 5px 10px;
+  text-align: left;
+}
+
+.md-body th {
+  background: #fafafa;
+}
+
+.md-body ul,
+.md-body ol {
+  padding-left: 22px;
+  margin: 6px 0;
+}
+
+.md-body blockquote {
+  border-left: 3px solid #d9d9d9;
+  margin: 8px 0;
+  padding: 2px 12px;
+  color: #666;
+}
+
+.md-body img {
+  max-width: 100%;
+  border-radius: 8px;
+}
+
+.md-body h1, .md-body h2, .md-body h3, .md-body h4 {
+  margin: 12px 0 8px;
+  line-height: 1.4;
+}
+
+/* 会话列表：去阴影，回归标准列表观感 */
+.ant-conversations .ant-conversations-item {
+  box-shadow: none !important;
+  border-radius: 6px;
+}
