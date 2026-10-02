@@ -1,14 +1,151 @@
-import React, { useState } from 'react';
-import { Modal, Tabs, Input, Upload, message, Typography, Space } from 'antd';
-import { InboxOutlined, KeyOutlined, FileTextOutlined } from '@ant-design/icons';
+import React, { useEffect, useRef, useState } from 'react';
+import { Modal, Tabs, Input, Upload, message, Typography, Space, Button, Alert } from 'antd';
+import {
+  InboxOutlined,
+  KeyOutlined,
+  FileTextOutlined,
+  SafetyCertificateOutlined,
+  LinkOutlined,
+} from '@ant-design/icons';
+import { httpClient } from '../../../infrastructure/http/client';
 import { useAccountStore } from '../../../application/account/store';
 
 const { TextArea } = Input;
 const { Dragger } = Upload;
 const { Text } = Typography;
 
+/** 官方 OAuth 授权导入：浏览器走 auth.openai.com 官方授权页，本地回调接 code 换 token。 */
+const OAuthImportPane: React.FC<{ onDone: () => void }> = ({ onDone }) => {
+  const [phase, setPhase] = useState<'idle' | 'waiting' | 'success' | 'error'>('idle');
+  const [sessionId, setSessionId] = useState('');
+  const [errMsg, setErrMsg] = useState('');
+  const [callbackUrl, setCallbackUrl] = useState('');
+  const timerRef = useRef<number | null>(null);
+
+  // 离开弹窗/组件卸载时停掉轮询
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) window.clearInterval(timerRef.current);
+    };
+  }, []);
+
+  const begin = async () => {
+    try {
+      const res = await httpClient.post<any>('/admin/oauth/begin', {
+        redirect_uri: 'http://localhost:1455/auth/callback',
+      });
+      const { session_id, authorize_url } = res.data || {};
+      if (!session_id || !authorize_url) {
+        message.error('后端未返回授权地址');
+        return;
+      }
+      setSessionId(session_id);
+      setPhase('waiting');
+      window.open(authorize_url, '_blank', 'noopener');
+
+      // 轮询导入进度（回调监听器自动完成时结束）
+      timerRef.current = window.setInterval(async () => {
+        try {
+          const st = await httpClient.get<any>(`/admin/oauth/status`, {
+            params: { session_id },
+          });
+          const status = st.data?.status;
+          if (status === 'success') {
+            window.clearInterval(timerRef.current!);
+            setPhase('success');
+            message.success(`授权完成，账号已入库（${st.data.account_id}）`);
+            onDone();
+          } else if (status === 'error') {
+            window.clearInterval(timerRef.current!);
+            setErrMsg(st.data?.error || '未知错误');
+            setPhase('error');
+          }
+        } catch {
+          // 单次轮询失败忽略，下个周期重试
+        }
+      }, 2000);
+    } catch (err: any) {
+      message.error(err.message || '发起授权失败');
+    }
+  };
+
+  const exchangeManual = async () => {
+    if (!callbackUrl.trim()) {
+      message.warning('请粘贴授权后浏览器跳转的完整回调地址');
+      return;
+    }
+    try {
+      const res = await httpClient.post<any>('/admin/oauth/exchange', {
+        session_id: sessionId,
+        callback: callbackUrl.trim(),
+      });
+      message.success(`授权完成，账号已入库（${res.data?.account_id}）`);
+      setPhase('success');
+      onDone();
+    } catch (err: any) {
+      message.error(err.response?.data?.error || err.message || '换 token 失败');
+    }
+  };
+
+  if (phase === 'success') {
+    return (
+      <Alert
+        type="success"
+        showIcon
+        message="授权完成"
+        description="账号已写入 SQLite 并进入调度池，可在列表中查看。"
+      />
+    );
+  }
+
+  return (
+    <Space orientation="vertical" style={{ width: '100%' }} size="middle">
+      <Text type="secondary">
+        跳转到 auth.openai.com 官方授权页登录（与 Codex CLI 同款 PKCE 流程），
+        授权完成后本地回调端口自动换取 token 并入库，全程无需手动复制凭据。
+      </Text>
+
+      {phase === 'waiting' && (
+        <Alert
+          type="info"
+          showIcon
+          message="等待授权完成…"
+          description="已在浏览器打开官方授权页。若本地回调端口（1455）被占用，可把授权完成后浏览器地址栏里的完整回调地址粘贴到下方手动完成导入。"
+        />
+      )}
+
+      {phase === 'error' && (
+        <Alert type="error" showIcon message="导入失败" description={errMsg} />
+      )}
+
+      <div>
+        <Button type="primary" icon={<SafetyCertificateOutlined />} onClick={begin} loading={phase === 'waiting' && !errMsg}>
+          打开官方授权页
+        </Button>
+      </div>
+
+      {(phase === 'waiting' || phase === 'error') && (
+        <div>
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            手动兜底：粘贴授权后浏览器跳转的完整地址（含 code 参数）：
+          </Text>
+          <Space.Compact style={{ width: '100%', marginTop: 6 }}>
+            <Input
+              prefix={<LinkOutlined style={{ color: '#aaa' }} />}
+              placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+              value={callbackUrl}
+              onChange={(e) => setCallbackUrl(e.target.value)}
+            />
+            <Button onClick={exchangeManual}>完成导入</Button>
+          </Space.Compact>
+        </div>
+      )}
+    </Space>
+  );
+};
+
 export const AccountImportModal: React.FC = () => {
-  const { importModalOpen, setImportModalOpen, importAccounts } = useAccountStore();
+  const { importModalOpen, setImportModalOpen, importAccounts, fetchAccounts } = useAccountStore();
   const [activeTab, setActiveTab] = useState('text');
   const [rawText, setRawText] = useState('');
   const [loading, setLoading] = useState(false);
@@ -31,7 +168,21 @@ export const AccountImportModal: React.FC = () => {
     }
   };
 
+  const handleOAuthDone = () => {
+    fetchAccounts();
+    setImportModalOpen(false);
+  };
+
   const items = [
+    {
+      key: 'oauth',
+      label: (
+        <span>
+          <SafetyCertificateOutlined /> 官方授权登录
+        </span>
+      ),
+      children: <OAuthImportPane onDone={handleOAuthDone} />,
+    },
     {
       key: 'text',
       label: (
@@ -97,6 +248,7 @@ export const AccountImportModal: React.FC = () => {
       width={600}
       okText="确认导入"
       cancelText="取消"
+      okButtonProps={activeTab !== 'text' ? { style: { display: 'none' } } : undefined}
     >
       <Tabs activeKey={activeTab} onChange={setActiveTab} items={items} />
     </Modal>

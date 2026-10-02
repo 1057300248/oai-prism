@@ -1948,10 +1948,13 @@ func TestAdmin_Accounts_CRUD_SQLite(t *testing.T) {
 func TestAdmin_Requests_And_Chat_SQLite(t *testing.T) {
 	ts, _ := newTestServer(t, &fakeUpstream{t: t}, goodAccount(), nil)
 
-	// 1. 发起一次模型请求，触发中间件记录真实流水
-	respModel, err := http.Get(ts.URL + "/v1/models")
+	// 1. 发起一次模型推理请求，触发中间件记录真实流水。
+	//    明细只记录推理入口（chat/completions 等）；/v1/models 这类
+	//    探测流量不产生推理，不入明细。
+	respModel, err := http.Post(ts.URL+"/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"gpt-6.1-sol","messages":[{"role":"user","content":"hi"}]}`))
 	if err != nil {
-		t.Fatalf("GET /v1/models 失败: %v", err)
+		t.Fatalf("POST /v1/chat/completions 失败: %v", err)
 	}
 	_ = respModel.Body.Close()
 
@@ -1980,8 +1983,8 @@ func TestAdmin_Requests_And_Chat_SQLite(t *testing.T) {
 	if reqData.Total == 0 || len(reqData.Items) == 0 {
 		t.Fatalf("未能查到真实请求明细: total=%d", reqData.Total)
 	}
-	if reqData.Items[0].Path != "/v1/models" {
-		t.Errorf("请求路径错误: %s, 期望 /v1/models", reqData.Items[0].Path)
+	if reqData.Items[0].Path != "/v1/chat/completions" {
+		t.Errorf("请求路径错误: %s, 期望 /v1/chat/completions", reqData.Items[0].Path)
 	}
 
 	// 3. GET /admin/statistics 验证聚合统计

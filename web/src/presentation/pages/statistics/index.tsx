@@ -299,15 +299,17 @@ export const StatisticsPage: React.FC = () => {
         <Col xs={24} lg={14}>
           <Card
             title="请求吞吐走势"
+            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+            styles={{ body: { flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' } }}
             extra={
               <Button icon={<ReloadOutlined />} onClick={fetchMetrics} loading={loading}>
                 刷新指标
               </Button>
             }
           >
-            <div style={{ height: 300 }}>
+            <div style={{ flex: 1, minHeight: 260 }}>
               {timeSeries.length > 0 ? (
-                <Area {...areaConfig} />
+                <Area {...areaConfig} autoFit />
               ) : (
                 <div style={{ textAlign: 'center', paddingTop: 100, color: '#999' }}>
                   暂无请求数据
@@ -319,14 +321,15 @@ export const StatisticsPage: React.FC = () => {
         <Col xs={24} lg={10}>
           <Card
             title="模型调用分布"
-            styles={{ body: { padding: '12px 16px', height: '100%', display: 'flex', flexDirection: 'column' } }}
+            style={{ height: '100%', display: 'flex', flexDirection: 'column' }}
+            styles={{ body: { padding: '12px 16px', flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column' } }}
           >
             {activeUsages.length > 0 ? (
               <Row gutter={8} align="middle" style={{ flex: 1, minHeight: 0 }}>
                 {/* 环形图：外部标签与图例全部关闭，信息由右侧列表承担 */}
                 <Col span={11} style={{ height: '100%', display: 'flex', alignItems: 'center' }}>
-                  <div style={{ width: '100%', height: 260 }}>
-                    <Pie {...pieConfig} />
+                  <div style={{ width: '100%', height: '100%', minHeight: 220 }}>
+                    <Pie {...pieConfig} autoFit />
                   </div>
                 </Col>
                 {/* 紧凑模型列表：取代原独立「模型性能明细」表格（内容重复） */}

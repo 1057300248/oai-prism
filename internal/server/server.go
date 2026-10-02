@@ -320,6 +320,23 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 		})
 	})
 
+	// 官方 OAuth 授权导入：浏览器走 auth.openai.com 官方授权页，
+	// 本地回调接 code，PKCE 换 token 后直接入库（详 OAuth 流程见 oauth_admin.go）。
+	mux.HandleFunc("POST /admin/oauth/begin", s.handleOAuthBegin)
+	mux.HandleFunc("GET /admin/oauth/status", s.handleOAuthStatus)
+	mux.HandleFunc("POST /admin/oauth/exchange", s.handleOAuthExchange)
+	// redirect_uri 若指向网关自身（http://<host>:<port>/admin/oauth/callback）
+	// 则走这个路由；指向独立本地端口时由临时监听器接（见 handleOAuthBegin）。
+	mux.HandleFunc("GET /admin/oauth/callback", func(w http.ResponseWriter, r *http.Request) {
+		sessID := r.URL.Query().Get("state")
+		sess := oauthSessions.get(sessID)
+		if sess == nil {
+			writeAdminErr(w, http.StatusBadRequest, "会话不存在或已过期")
+			return
+		}
+		s.handleLocalCallback(w, r, sess)
+	})
+
 	// PUT /admin/accounts/{id}: 更新账号属性并持久化至 SQLite
 	mux.HandleFunc("PUT /admin/accounts/{id}", func(w http.ResponseWriter, r *http.Request) {
 		id := r.PathValue("id")
