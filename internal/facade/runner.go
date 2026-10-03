@@ -345,13 +345,12 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			// 用户白等两分钟，看到的还是一个伪装成流断的错误。
 			// 实测（2026-10-01）：跳过同步的 start 100% 走这条路。
 			//
-			// 因此改为快速失败 + 让沙箱整体失效：客户端重试时会拿到
-			// 全新的（沙箱 + 项目）组合，实测成功率高得多。
-			r.sandboxes.Invalidate(acct.ID)
-			r.log.Warn("沙箱工作区同步未就绪，重置沙箱并快速失败（避免上游 122s 超时）",
+			// 保留可用沙箱容器，仅失效本项目的工作区同步状态，避免容器被无故销毁后重新申请冷启动。
+			r.sandboxes.InvalidateProject(acct.ID, projectID)
+			r.log.Warn("沙箱工作区同步未就绪，重置项目同步并快速失败（避免上游 122s 超时）",
 				"account", acct.ID, "project", projectID)
 			r.app.SandboxOps.Inc("sync", "reset")
-			return result, fmt.Errorf("沙箱工作区同步未就绪（上游沙箱异常），已重置会话，请重试")
+			return result, fmt.Errorf("沙箱工作区同步未就绪（上游沙箱异常），请重试")
 		}
 	}
 
@@ -399,6 +398,13 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			Extra:              req.Extra,
 		})
 		if err != nil {
+			if isSentinelThrottle(err) && attempt < sandboxStartRetries {
+				r.log.Info("start 遭遇 Sentinel 风控抖动，稍后重试", "attempt", attempt, "err", err)
+				if serr := sleepCtx(ctx, 1500*time.Millisecond); serr != nil {
+					return result, serr
+				}
+				continue
+			}
 			r.app.ConversationOps.Inc("start", "error")
 			return result, err
 		}
@@ -408,8 +414,12 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		r.app.SandboxOps.Inc("start", "not_ready")
 		r.log.Info("沙箱未就绪，稍后重试",
 			"attempt", attempt, "of", sandboxStartRetries, "reason", sandboxReason(startResp))
-		// 重试前把沙箱视为失效，下一轮重新申请 —— 大概率是容器被回收了。
-		r.sandboxes.Invalidate(acct.ID)
+		// 仅在多次未就绪（容器可能真正回收）时才失效整个沙箱，避免冷启动瞬态抖动销毁热容器
+		if attempt >= 3 {
+			r.sandboxes.Invalidate(acct.ID)
+		} else {
+			r.sandboxes.InvalidateProject(acct.ID, projectID)
+		}
 		// 线性退避：上游限流窗口是分钟级，固定短间隔只会打在限流上。
 		if serr := sleepCtx(ctx, time.Duration(attempt)*sandboxRetryDelay); serr != nil {
 			return result, serr
@@ -482,6 +492,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			if result.Usage == nil {
 				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
 			}
+			if result.ProjectID != "" && result.ConversationID != "" {
+				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
+			}
 			return result, nil
 		}
 		if len(st.TurnState) > 0 {
@@ -529,6 +542,17 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 
 		if err != nil {
 			r.app.PollRounds.Inc("error")
+			if isSentinelThrottle(err) {
+				failures++
+				r.log.Info("轮询遭遇 Sentinel 风控抖动，原地退避重试", "failures", failures, "err", err)
+				if failures >= 10 {
+					return result, fmt.Errorf("轮询连续遭遇风控失败 %d 次: %w", failures, err)
+				}
+				if serr := sleepCtx(ctx, 1500*time.Millisecond); serr != nil {
+					return result, serr
+				}
+				continue
+			}
 			if isAccountLevel(err) {
 				return result, err
 			}
@@ -641,6 +665,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			out := estimateTokens(result.Text)
 			if result.Usage == nil {
 				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
+			}
+			if result.ProjectID != "" && result.ConversationID != "" {
+				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
 			}
 			return result, nil
 		}
@@ -920,6 +947,14 @@ func pollWaitMs(f *config.FacadeConfig) int {
 	return f.PollWaitMs
 }
 
+// ActiveProject 返回当前账号最近活跃的 ProjectID（供伴生轻量请求无缝复用）。
+func (r *Runner) ActiveProject(accountID string) (string, bool) {
+	if r == nil || r.projects == nil {
+		return "", false
+	}
+	return r.projects.GetActive(accountID, time.Now())
+}
+
 // resolveProject 取（或创建）本轮使用的项目。
 func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req *RunRequest) (string, error) {
 	f := &r.cfg.Facade
@@ -939,6 +974,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 	}
 
 	if id, ok := r.projects.Get(acct.ID, bucketKey, time.Now()); ok {
+		r.projects.PutActive(acct.ID, id, time.Now())
 		r.app.ProjectOps.Inc("reuse", "hit")
 		return id, nil
 	}
@@ -947,6 +983,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 	defer unlock()
 
 	if id, ok := r.projects.Get(acct.ID, bucketKey, time.Now()); ok {
+		r.projects.PutActive(acct.ID, id, time.Now())
 		r.app.ProjectOps.Inc("reuse", "hit")
 		return id, nil
 	}
@@ -957,6 +994,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 		return "", err
 	}
 	r.projects.Put(acct.ID, bucketKey, id, time.Now())
+	r.projects.PutActive(acct.ID, id, time.Now())
 	r.app.ProjectOps.Inc("create", "ok")
 	return id, nil
 }
@@ -965,12 +1003,27 @@ func (r *Runner) createProject(ctx context.Context, acct *account.Account) (stri
 	cred := acct.Credential()
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
-	proj, err := r.client.CreateProject(ctx, p, nil)
-	if err != nil {
-		return "", err
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(time.Duration(attempt-1) * 1500 * time.Millisecond):
+			}
+			r.log.Info("重试创建项目", "account", acct.ID, "attempt", attempt)
+		}
+		proj, err := r.client.CreateProject(ctx, p, nil)
+		if err == nil {
+			r.log.Debug("已创建上游项目", "account", acct.ID, "project", proj.Key())
+			return proj.Key(), nil
+		}
+		lastErr = err
+		if !isSentinelThrottle(err) {
+			break
+		}
 	}
-	r.log.Debug("已创建上游项目", "account", acct.ID, "project", proj.Key())
-	return proj.Key(), nil
+	return "", lastErr
 }
 
 func nextInterval(cur, max time.Duration) time.Duration {
@@ -1000,20 +1053,18 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 
 // isAccountLevel 判断错误是否值得换账号重试。
 //
-// 401 是账号问题；429 是配额问题；5xx 也值得换号。
+// 401 是账号凭据问题；429 是账号配额问题；5xx 值得换号。
 // 4xx 协议错误不重试 —— 换号也一样错。
-// 例外：Sentinel 风控 403（"Request verification failed"）不是账号
-// 问题 —— 同账号重试即恢复（IsAuthError 已把它排除出认证失效），
-// 但它是**瞬时**故障而非协议错误，同号重试值得（单号池下"换号"
-// 就是同号重试；风控窗口内 runLoop 的 attempt 上限天然限流）。
+// 注意：Sentinel 风控 403（"Request verification failed"）是请求级
+// 签名挑战偶发抖动，同账号退避重试即恢复，**绝不是**账号失效或配额耗尽。
+// 若将其判为账号级故障，会引发毁灭性的换号重试：
+// 摧毁现有会话、推翻已就绪的工作区、导致下游断流重连。因此它由各请求端点
+// 内部原地自愈，绝不上报为账号级故障。
 func isAccountLevel(err error) bool {
 	if err == nil {
 		return false
 	}
 	if creds.IsAuthError(err) || creds.IsRateLimited(err) {
-		return true
-	}
-	if isSentinelThrottle(err) {
 		return true
 	}
 	var ae *creds.APIError

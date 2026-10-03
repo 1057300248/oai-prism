@@ -231,15 +231,15 @@ func conversationKey(r *http.Request, body map[string]json.RawMessage, msgs []Ch
 		}
 	}
 
-	// 5. 首条 user 消息采样指纹（严禁包含 system 消息，因为折叠历史会让 system 每轮剧变导致哈希漂移！）
+	// 5. 首条真实 user 消息采样指纹（排除静态环境指令如 AGENTS.md，严禁包含 system 消息，保持指纹长期稳定）
 	for _, m := range msgs {
 		if strings.EqualFold(m.Role, "user") {
 			txt := strings.TrimSpace(m.Content.Text())
-			if txt != "" {
-				sum := sha256.Sum256([]byte(txt))
-				return "f:u:" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10])
+			if txt == "" || isStaticInstruction(txt) {
+				continue
 			}
-			break
+			sum := sha256.Sum256([]byte(txt))
+			return "f:u:" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10])
 		}
 	}
 

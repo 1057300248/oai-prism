@@ -225,9 +225,11 @@ func sessionChainRecord(key string, res *RunResult, model string) {
 	}
 	if res.ConversationID != "" {
 		e.ConversationID = res.ConversationID
+		sessionChain.entries["cid:"+res.ConversationID] = e
 	}
 	if res.ResponseID != "" {
 		e.ResponseID = res.ResponseID
+		sessionChain.entries["prev:"+res.ResponseID] = e
 	} else if res.RequestID != "" && e.ResponseID == "" {
 		e.ResponseID = res.RequestID
 	}

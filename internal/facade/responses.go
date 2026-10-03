@@ -171,6 +171,18 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	}
 	runReq.Extra = passthroughFields(rawFields, responsesKnownFields)
 
+	isAux := !bridge && len(rawFields["input"]) < 3000 && (toolsStr == "" || toolsStr == "null" || toolsStr == "[]")
+	if isAux {
+		// 伴生轻量请求（标题/摘要生成）：优先复用活跃项目，绝不新建独立项目，亦不污染会话链
+		if runReq.ProjectID == "" {
+			if chainProj, _, _, _, _ := sessionChainGet(stickyKey); chainProj != "" {
+				runReq.ProjectID = chainProj
+			} else if actProj, ok := h.runner.ActiveProject(accountID); ok {
+				runReq.ProjectID = actProj
+			}
+		}
+	}
+
 	id := newID("resp_")
 	created := time.Now().Unix()
 
@@ -178,7 +190,7 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		h.streamResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind, !hasPriorToolResult(rawFields))
 		return
 	}
-	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind)
+	h.syncResponses(w, r, runReq, id, created, req.Model, bridge, execToolName, execKind, isAux)
 }
 
 var responsesKnownFields = map[string]struct{}{
@@ -377,9 +389,13 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 			if err := sw.WriteRaw(done); err != nil {
 				return
 			}
+			finalRespID := id
+			if res != nil && res.ResponseID != "" {
+				finalRespID = res.ResponseID
+			}
 			done = AppendResponsesEvent(buf[:0], ResponsesEvent{
 				Type:       "response.completed",
-				ResponseID: id, Model: publicModel, CreatedAt: created,
+				ResponseID: finalRespID, Model: publicModel, CreatedAt: created,
 				OutputJSON: "[" + item + "]",
 				Usage:      usage,
 			})
@@ -388,7 +404,11 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		}
 
 		// 纯文本：桥模式下一次性给出（模型已完整生成，无需伪增量）。
-		_ = emitTextResponseEvents(sw, &buf, id, publicModel, created, itemID, text, usage)
+		finalRespID := id
+		if res != nil && res.ResponseID != "" {
+			finalRespID = res.ResponseID
+		}
+		_ = emitTextResponseEvents(sw, &buf, finalRespID, publicModel, created, itemID, text, usage)
 		return
 	}
 
@@ -437,7 +457,11 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 	}
 
 	// 收尾事件必须逐个发全，否则 SDK 会一直等 response.completed。
-	_ = emitTextResponseEvents(sw, &buf, id, publicModel, created, itemID, text, usage)
+	finalRespID := id
+	if res != nil && res.ResponseID != "" {
+		finalRespID = res.ResponseID
+	}
+	_ = emitTextResponseEvents(sw, &buf, finalRespID, publicModel, created, itemID, text, usage)
 }
 
 // emitTextResponseEvents 发文本型回复的收尾事件序列：
@@ -460,12 +484,14 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 	return nil
 }
 
-func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
+func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string, isAux bool) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	bindLogAccount(r, res)
-	sessionChainRecord(runReq.StickyKey, res, runReq.Model)
-	if err == nil && res != nil && res.Text != "" {
-		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+	if !isAux {
+		sessionChainRecord(runReq.StickyKey, res, runReq.Model)
+		if err == nil && res != nil && res.Text != "" {
+			sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
+		}
 	}
 	if err != nil {
 		status, typ, msg := mapError(err)
@@ -487,6 +513,11 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 				TotalTokens:  res.Usage.TotalTokens,
 			}
 		}
+	}
+
+	finalRespID := id
+	if res != nil && res.ResponseID != "" {
+		finalRespID = res.ResponseID
 	}
 
 	if bridge {
@@ -511,7 +542,7 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 				}
 			}
 			respMap := map[string]any{
-				"id": id, "object": "response", "created_at": created,
+				"id": finalRespID, "object": "response", "created_at": created,
 				"status": "completed", "model": publicModel,
 				"output": []any{out},
 			}
@@ -524,7 +555,7 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 		text = stripExecFence(text)
 	}
 	resp := ResponsesResponse{
-		ID:        id,
+		ID:        finalRespID,
 		Object:    "response",
 		CreatedAt: created,
 		Status:    "completed",
