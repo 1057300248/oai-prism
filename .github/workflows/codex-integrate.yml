@@ -1,0 +1,87 @@
+name: Codex Capability Integration
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+    paths: [.github/workflows/codex-integrate.yml]
+permissions:
+  contents: write
+concurrency:
+  group: codex-capability-integration
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == '1057300248/oai-prism'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Guarded integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python tools/codex_integrate.py
+          gofmt -w internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go tools/codex-fixture
+          git diff --check
+      - name: Full Go verification
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -count=1 -timeout 120s -json ./... > codex-tests.jsonl
+          go test -timeout 180s -race ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oaiprism-amd64 ./cmd/oaiprism
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/oaiprism-arm64 ./cmd/oaiprism
+      - name: Real Codex 0.160 client workflow
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/codex-tools"
+          npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
+          go build -o "$RUNNER_TEMP/codex-fixture" ./tools/codex-fixture
+          export CODEX_CLI="$RUNNER_TEMP/codex-tools/node_modules/.bin/codex"
+          export CODEX_FIXTURE_BIN="$RUNNER_TEMP/codex-fixture"
+          export CODEX_EVIDENCE_DIR="$GITHUB_WORKSPACE/codex-evidence"
+          python tools/codex_contract_test.py
+      - name: Commit verified integration only
+        run: |
+          set -euo pipefail
+          rm tools/codex_integrate.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go tools/codex-fixture tools/codex_integrate.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
+          git commit -m 'feat: integrate scoped model capabilities and verified Codex local tool contracts'
+          git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
+          git rev-parse HEAD > verified-codex-source.txt
+      - name: Evidence and diagnostics
+        if: always()
+        run: |
+          python - <<'PY'
+          import json,pathlib
+          p=pathlib.Path('codex-tests.jsonl')
+          events=[json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+          counts={a:sum(e.get('Action')==a and bool(e.get('Test')) for e in events) for a in ['pass','fail','skip']}
+          print('TEST COUNTS',counts)
+          failed={e.get('Test') for e in events if e.get('Action')=='fail'}
+          for e in events:
+              if e.get('Test') in failed and e.get('Output'): print(e['Output'],end='')
+          pathlib.Path('codex-counts.json').write_text(json.dumps(counts))
+          PY
+          tar --exclude=.git --exclude=codex-evidence -czf /tmp/codex-candidate-source.tar.gz internal tools go.mod go.sum
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codex-capability-evidence
+          path: |
+            verified-codex-source.txt
+            codex-counts.json
+            codex-tests.jsonl
+            codex-evidence/
+            /tmp/codex-candidate-source.tar.gz
+          retention-days: 3
