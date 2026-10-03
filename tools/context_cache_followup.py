@@ -16,7 +16,7 @@ edit(p,'func (c *summaryCache) getLocked(key string) (string, bool) {\n','func (
 edit(p,'func (c *summaryCache) build(ctx context.Context, key string, ttl time.Duration, fn func() (string, error)) (string, bool, error) {\n\tc.mu.Lock()','func (c *summaryCache) build(ctx context.Context, key string, ttl time.Duration, fn func() (string, error)) (string, bool, error) {\n\tif err:=ctx.Err();err!=nil{return "",false,err}\n\tc.mu.Lock()\n\tif c.closed {c.mu.Unlock();return "",false,errors.New("summary cache closed")}')
 edit(p,'\ttext, err := fn()','\ttext, err := safeSummaryBuild(fn)')
 edit(p,'\tif err == nil && len(text) <= 256<<10 {','\tif c.closed && err==nil {err=errors.New("summary cache closed")}\n\tif err == nil && len(text) <= 256<<10 {')
-edit(p,'\tclear(c.entries)\n','\tc.closed=true\n\tclear(c.entries)\n')
+edit(p,'clear(c.entries)','c.closed = true; clear(c.entries)')
 edit(p,'func (c *summaryCache) clear() {','''func safeSummaryBuild(fn func()(string,error))(text string,err error){
     defer func(){if recover()!=nil{err=errors.New("summarizer failed unexpectedly")}}()
     return fn()
