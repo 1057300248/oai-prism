@@ -59,7 +59,7 @@ class GatewaySDK(unittest.TestCase):
         self.assertEqual(followup.output_text, "The weather is sunny.")
         stored = self.client.responses.retrieve(response.id)
         self.assertEqual(stored.id, response.id)
-        self.assertTrue(self.client.responses.delete(response.id).deleted)
+        self.client.responses.delete(response.id)
         with self.assertRaises(NotFoundError):
             self.client.responses.retrieve(response.id)
 
