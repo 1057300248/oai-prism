@@ -327,8 +327,6 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 上游的 codexRequestDebug 里会直接写 sandbox_url_resolved: null。
 	sb, err := r.ensureSandbox(ctx, acct, projectID)
 	if err != nil {
-		// 申请失败也让它继续：万一上游改成不强制沙箱，或某个端点仍可用。
-		// 真失败了 start 会给出明确原因，比在这里提前判死更有信息量。
 		r.log.Warn("申请沙箱失败，尝试不带沙箱继续", "account", acct.ID, "err", err)
 		r.app.SandboxOps.Inc("acquire", "error")
 	}
@@ -426,6 +424,18 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		// 线性退避：上游限流窗口是分钟级，固定短间隔只会打在限流上。
 		if serr := sleepCtx(ctx, time.Duration(attempt)*sandboxRetryDelay); serr != nil {
 			return result, serr
+		}
+
+		// 若之前未装配沙箱（或已被回收），在下一轮 start 前重新补齐沙箱与工作区同步装配进 meta
+		if sb == nil || !sb.Usable() {
+			if newSb, serr := r.ensureSandbox(ctx, acct, projectID); serr == nil && newSb.Usable() {
+				sb = newSb
+				meta["sandbox_url"] = sb.URL
+				meta["sandbox_token"] = sb.Token
+			}
+		}
+		if sb.Usable() && projectID != "" && !r.sandboxes.Synced(acct.ID, projectID) {
+			_ = r.syncSandboxWorkspace(ctx, acct, sb, projectID)
 		}
 	}
 	r.app.ConversationOps.Inc("start", "ok")
@@ -732,20 +742,29 @@ func (r *Runner) ensureSandbox(ctx context.Context, acct *account.Account, proje
 	cred := acct.Credential()
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
-	sb, err := r.client.AcquireSandbox(ctx, p)
-	if err != nil {
-		return nil, err
+	var lastErr error
+	for attempt := 1; attempt <= 4; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(time.Duration(attempt-1) * 1500 * time.Millisecond):
+			}
+			r.log.Info("重试申请沙箱", "account", acct.ID, "attempt", attempt)
+		}
+		sb, err := r.client.AcquireSandbox(ctx, p)
+		if err == nil {
+			r.log.Info("已申请沙箱", "account", acct.ID, "url", sb.URL)
+			r.sandboxes.Put(acct.ID, sb)
+			r.app.SandboxOps.Inc("acquire", "ok")
+			return sb, nil
+		}
+		lastErr = err
+		if !isSentinelThrottle(err) {
+			break
+		}
 	}
-	r.log.Info("已申请沙箱", "account", acct.ID, "url", sb.URL)
-
-	// 注意：这里**不等就绪**。
-	//
-	// 容器分配完成只是必要条件，真正的"就绪"要等工作区同步完成
-	// （见 syncSandboxWorkspace）—— 那一步需要 projectID，
-	// 而本函数拿不到。把等待放在这里只会白等一个窗口。
-	r.sandboxes.Put(acct.ID, sb)
-	r.app.SandboxOps.Inc("acquire", "ok")
-	return sb, nil
+	return nil, lastErr
 }
 
 // isSentinelThrottle 判断是否为上游 Sentinel 风控的偶发拒绝：
