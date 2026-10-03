@@ -3,7 +3,7 @@ on:
   push:
     branches: [codex/newapi-native-hardening-20261003]
   pull_request:
-    paths: ['internal/**', 'tools/gateway*', 'tools/gateway-fixture/**', '.github/workflows/gateway-sdk.yml']
+    paths: ['internal/**', 'tools/gateway*', 'tools/context*', 'tools/gateway-fixture/**', '.github/workflows/gateway-sdk.yml']
 permissions:
   contents: read
 concurrency:
@@ -32,7 +32,7 @@ jobs:
           cd /tmp/gateway-node-sdk
           npm init -y >/dev/null
           npm install --ignore-scripts --save-exact openai@7.27.0
-      - name: Test SDK accumulators and tool round trips
+      - name: Test SDK protocols, context compaction and cache controls
         run: |
           set -euo pipefail
           go build -o /tmp/gateway-fixture ./tools/gateway-fixture
@@ -44,8 +44,11 @@ jobs:
             sleep 1
           done
           python tools/gateway_sdk_test.py 2>&1 | tee python-sdk.log
+          python tools/context_sdk_test.py 2>&1 | tee python-context-sdk.log
           cp tools/gateway_sdk_test.mjs /tmp/gateway-node-sdk/test.mjs
+          cp tools/context_sdk_test.mjs /tmp/gateway-node-sdk/context.mjs
           node /tmp/gateway-node-sdk/test.mjs 2>&1 | tee javascript-sdk.log
+          node /tmp/gateway-node-sdk/context.mjs 2>&1 | tee javascript-context-sdk.log
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -54,4 +57,6 @@ jobs:
             fixture.log
             python-sdk.log
             javascript-sdk.log
+            python-context-sdk.log
+            javascript-context-sdk.log
           retention-days: 3
