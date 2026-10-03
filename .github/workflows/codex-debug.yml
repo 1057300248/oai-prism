@@ -28,9 +28,7 @@ jobs:
           gofmt -w internal/gateway internal/facade/gateway_adapter.go
           mkdir -p "$RUNNER_TEMP/codex-tools" codex-debug
           npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
-          BIN=$(find "$RUNNER_TEMP/codex-tools/node_modules" -type f -path '*/codex/codex' | head -1)
-          test -n "$BIN"
-          tar -C "$(dirname "$BIN")" -czf codex-debug/pinned-cli.tar.gz codex
+          tar -C "$RUNNER_TEMP/codex-tools" -czf codex-debug/pinned-cli.tar.gz node_modules package.json
           go build -o "$RUNNER_TEMP/codex-fixture" ./tools/codex-fixture
       - name: Actual client diagnostics
         run: |
