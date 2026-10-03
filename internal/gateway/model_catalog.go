@@ -16,34 +16,30 @@ func (h *Handler) parseRequest(body []byte, responses bool) (*Request, error) {
 	for id, target := range h.options.Models {
 		options.Models[id] = target
 	}
-	declared := map[string]bool{}
+	// Read one immutable source snapshot and aggregate it in a single pass.
+	records := h.catalog.Records()
+	declared := make(map[string]bool, len(h.options.Catalog.Publish))
 	for _, id := range h.options.Catalog.Publish {
 		declared[id] = true
 		options.Models[id] = id
-	}
-	for _, r := range h.catalog.Records() {
-		if h.catalog.Published(r.ID) {
-			declared[r.ID] = true
-			options.Models[r.ID] = r.UpstreamID
-		}
 	}
 	options.CatalogEfforts = map[string][]string{}
 	options.Context.ModelWindows = map[string]int{}
 	for id, w := range h.options.Context.ModelWindows {
 		options.Context.ModelWindows[id] = w
 	}
-	for id := range declared {
-		for _, r := range h.catalog.Records() {
-			if r.ID == id {
-				if !r.Stale && r.ContextWindow > 0 {
-					w := options.Context.window(id)
-					if w == 0 || r.ContextWindow < w {
-						options.Context.ModelWindows[id] = r.ContextWindow
-					}
-				}
-				options.CatalogEfforts[id] = append(options.CatalogEfforts[id], r.ReasoningEfforts...)
+	for _, record := range records {
+		if !declared[record.ID] {
+			continue
+		}
+		options.Models[record.ID] = record.UpstreamID
+		if !record.Stale && record.ContextWindow > 0 {
+			window := options.Context.window(record.ID)
+			if window == 0 || record.ContextWindow < window {
+				options.Context.ModelWindows[record.ID] = record.ContextWindow
 			}
 		}
+		options.CatalogEfforts[record.ID] = append(options.CatalogEfforts[record.ID], record.ReasoningEfforts...)
 	}
 	q, err := Parse(body, responses, options)
 	if err != nil {
