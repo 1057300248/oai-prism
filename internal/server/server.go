@@ -23,6 +23,7 @@ import (
 	"github.com/oai-prism/oaiprism/internal/config"
 	"github.com/oai-prism/oaiprism/internal/creds"
 	"github.com/oai-prism/oaiprism/internal/facade"
+	"github.com/oai-prism/oaiprism/internal/gateway"
 	"github.com/oai-prism/oaiprism/internal/metrics"
 	"github.com/oai-prism/oaiprism/internal/middleware"
 	"github.com/oai-prism/oaiprism/internal/prism"
@@ -31,19 +32,38 @@ import (
 
 // Server 是完整运行实例。
 type Server struct {
-	cfg    *config.Config
-	log    *slog.Logger
-	app    *metrics.App
-	pool   *account.Pool
-	store  *account.Store
-	sqlite *account.SQLiteStore
-	rec    *capture.Recorder
-	srv    *http.Server
-	gwPort string // 网关自身端口（OAuth 回调降级路由用）
+	gateway *gateway.Handler
+	runner  *facade.Runner
+	cfg     *config.Config
+	log     *slog.Logger
+	app     *metrics.App
+	pool    *account.Pool
+	store   *account.Store
+	sqlite  *account.SQLiteStore
+	rec     *capture.Recorder
+	srv     *http.Server
+	gwPort  string // 网关自身端口（OAuth 回调降级路由用）
 }
 
 // New 组装并返回服务器。
 func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
+	gatewayOptions := cfg.Facade.Gateway
+	gatewayOptions.APIKeys = cfg.Facade.APIKeys
+	gatewayOptions.Models = make(map[string]string, len(cfg.Facade.Models)+1)
+	for name, mapping := range cfg.Facade.Models {
+		gatewayOptions.Models[name] = mapping.Model
+	}
+	if cfg.Facade.DefaultModel != "" {
+		gatewayOptions.Models[cfg.Facade.DefaultModel] = cfg.Facade.DefaultModel
+	}
+	if gatewayOptions.Enabled {
+		if !cfg.Facade.Enabled || cfg.Capture.Enabled {
+			return nil, fmt.Errorf("gateway requires facade enabled and capture disabled")
+		}
+		if err := gatewayOptions.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	app := metrics.NewApp()
 
 	// 1) 账号池。初始账号来自配置文件 + 凭据文件 + SQLite。
@@ -132,12 +152,27 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		rec:    rec,
 	}
 
+	s.runner = runner
+	if gatewayOptions.Enabled {
+		public, err := gateway.New(gatewayOptions, facade.NewGatewayEngine(cfg, runner))
+		if err != nil {
+			_ = s.Close()
+			return nil, err
+		}
+		s.gateway = public
+	}
 	// 5) 路由。
 	mux := http.NewServeMux()
 	if cfg.Facade.Enabled {
-		facadeHandler.Register(mux)
+		if s.gateway != nil {
+			mux.Handle("/", s.gateway)
+		} else {
+			facadeHandler.Register(mux)
+		}
 	}
-	rawHandler.Register(mux)
+	if s.gateway == nil {
+		rawHandler.Register(mux)
+	}
 	s.registerOps(mux, runner)
 
 	handler := middleware.Chain(s.requestAuditMiddleware(mux),
@@ -261,7 +296,7 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 			"uptime_sec":     int(time.Since(startTime).Seconds()),
 		}
 		code := http.StatusOK
-		if s.pool.Size() == 0 {
+		if s.pool.Size() == 0 || healthy == 0 {
 			// 没有账号时明确不 ready：这能让人一眼看出"漏配凭据了"，
 			// 而不是等到线上请求全 502 才发现。
 			body["status"] = "no_credentials"
@@ -271,6 +306,10 @@ func (s *Server) registerOps(mux *http.ServeMux, runner *facade.Runner) {
 		w.WriteHeader(code)
 		_ = json.NewEncoder(w).Encode(body)
 	})
+
+	if cfg.Facade.Gateway.Enabled {
+		return
+	}
 
 	mux.HandleFunc("GET /admin/accounts", func(w http.ResponseWriter, r *http.Request) {
 		now := time.Now()
@@ -752,6 +791,16 @@ func writeAdminErr(w http.ResponseWriter, status int, msg string) {
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+type auditBody struct {
+	io.Reader
+	io.Closer
+}
+
+func (w *statusResponseWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+func (w *statusResponseWriter) FlushError() error {
+	return http.NewResponseController(w.ResponseWriter).Flush()
+}
+
 type statusResponseWriter struct {
 	http.ResponseWriter
 	statusCode  int
@@ -781,6 +830,10 @@ func (w *statusResponseWriter) Flush() {
 }
 
 func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
+	// Public gateway never journals request/response bodies in the workbench database.
+	if s.cfg.Facade.Gateway.Enabled {
+		return next
+	}
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 明细流水只记录「模型调用」：四个推理入口。
 		// 其余流量（模型清单、管理端、Dashboard、原始反代等）不产生推理，
@@ -813,7 +866,7 @@ func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
 		if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
 			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			if err == nil {
-				r.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+				r.Body = &auditBody{Reader: io.MultiReader(bytes.NewReader(bodyBytes), r.Body), Closer: r.Body}
 				var parsed map[string]any
 				if json.Unmarshal(bodyBytes, &parsed) == nil {
 					if m, ok := parsed["model"].(string); ok {
@@ -977,6 +1030,12 @@ func (s *Server) Metrics() *metrics.App { return s.app }
 
 // Close 释放服务占用的所有资源（包含 SQLite 句柄）。
 func (s *Server) Close() error {
+	if s.gateway != nil {
+		defer s.gateway.Close()
+	}
+	if s.runner != nil {
+		defer s.runner.Close()
+	}
 	if s.sqlite != nil {
 		_ = s.sqlite.Close()
 	}

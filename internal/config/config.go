@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/oai-prism/oaiprism/internal/gateway"
 	"gopkg.in/yaml.v3"
 )
 
@@ -222,8 +223,9 @@ type PoolConfig struct {
 
 // FacadeConfig 描述 OpenAI/Anthropic 兼容门面。
 type FacadeConfig struct {
-	Enabled bool     `yaml:"enabled"`
-	APIKeys []string `yaml:"api_keys"` // 空 = 不校验（仅建议本地）
+	Gateway gateway.Options `yaml:"gateway"`
+	Enabled bool            `yaml:"enabled"`
+	APIKeys []string        `yaml:"api_keys"` // 空 = 不校验（仅建议本地）
 
 	DefaultModel string `yaml:"default_model"`
 
