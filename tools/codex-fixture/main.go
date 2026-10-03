@@ -1,5 +1,4 @@
-// Deterministic localhost-only protocol fixture. This binary is NEVER a
-// production backend. It returns fixed plans, not real model judgments.
+// Deterministic localhost-only protocol fixture. NEVER a production backend.
 package main
 
 import (
@@ -21,13 +20,14 @@ import (
 
 type fixture struct{mu sync.Mutex;report string;work string}
 func(f *fixture)record(value any){f.mu.Lock();defer f.mu.Unlock();file,err:=os.OpenFile(f.report,os.O_CREATE|os.O_APPEND|os.O_WRONLY,0600);if err!=nil{panic(err)};defer file.Close();_ = json.NewEncoder(file).Encode(value)}
-func(f *fixture)Run(ctx context.Context,q *gateway.Request,accepted func()error,emit func(gateway.Delta)error)(*gateway.Result,error){
+func(f *fixture)Run(ctx context.Context,q *gateway.Request,accepted func()error,emit func(gateway.Delta)error)(result *gateway.Result,runErr error){
+ defer func(){if runErr!=nil{log.Printf("FIXTURE engine error: %v",runErr)}}()
  if ctx.Err()!=nil{return nil,ctx.Err()}
  if q.InternalSummary{return nil,errors.New("fixture did not authorize summary calls")}
  outputs:=[]gateway.Item{}
  for _,item:=range q.Items{if item.Type=="function_call_output"||item.Type=="custom_tool_call_output"{outputs=append(outputs,item)}}
- // Validate that the last operation actually completed on the client. The test
- // must fail rather than moving to the next fixed response after tool rejection.
+ diagnostics,_:=json.Marshal(map[string]any{"model":q.Model,"received_outputs":outputs,"declared_tools":q.Tools})
+ log.Printf("FIXTURE request: %s",diagnostics)
  if len(outputs)>0{
   last:=outputs[len(outputs)-1];data,_:=json.Marshal(last)
   for _,marker:=range []string{"unsupported custom tool","failed to parse","execution error","Permission denied","Process exited with code 1","patch rejected"}{if strings.Contains(string(data),marker){return nil,fmt.Errorf("client tool execution failed: %s",marker)}}
@@ -55,8 +55,6 @@ func(f *fixture)Run(ctx context.Context,q *gateway.Request,accepted func()error,
  if err!=nil{return nil,err}
  f.record(map[string]any{"model":q.Model,"effort":q.Effort,"prior_outputs":len(outputs),"declared_tools":len(q.Tools),"returned_calls":calls,"received_outputs":outputs})
  envelope,_:=json.Marshal(map[string]any{"text":text,"tool_calls":calls})
- // Return RAW text through the actual schema/custom-input validator. Do not
- // prepopulate Result.Calls and accidentally bypass the gateway adapter.
  if accepted!=nil{if err=accepted();err!=nil{return nil,err}}
  if emit!=nil{if err=emit(gateway.Delta{Text:string(envelope)});err!=nil{return nil,err}}
  return &gateway.Result{Text:string(envelope),Usage:&gateway.Usage{Input:50,Output:20,Source:"upstream"}},nil
