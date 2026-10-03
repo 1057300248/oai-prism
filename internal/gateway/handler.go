@@ -257,6 +257,14 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, s *stream, err er
 	writeJSON(w, api.Status, errorBody(api))
 }
 func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string, responses bool) {
+	// Bound request-body allocation and schema compilation, not just inference.
+	select {
+	case h.slots <- struct{}{}:
+		defer func() { <-h.slots }()
+	default:
+		h.fail(w, r, nil, &APIError{Status: 503, Code: "gateway_busy", Message: "Gateway concurrency capacity is exhausted."})
+		return
+	}
 	for name := range r.Header {
 		k := strings.ToLower(name)
 		if strings.HasPrefix(k, "x-oaiprism-") || strings.HasPrefix(k, "x-prism-") || k == "x-local-workspace" || k == "openai-sentinel-token" || k == "x-openai-sentinel-token" {
@@ -320,13 +328,6 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 	contract, err := Prepare(q)
 	if err != nil {
 		h.fail(w, r, nil, err)
-		return
-	}
-	select {
-	case h.slots <- struct{}{}:
-		defer func() { <-h.slots }()
-	default:
-		h.fail(w, r, nil, &APIError{Status: 503, Code: "gateway_busy", Message: "Gateway concurrency capacity is exhausted."})
 		return
 	}
 	timeout := h.options.Timeout
