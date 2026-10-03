@@ -2,7 +2,7 @@
 # workbench profile. It never exposes /admin, /dashboard or /prism routes.
 # Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
 # Supply your own authorized upstream credentials in the separately mounted file.
-# Context/cache behavior: ../CONTEXT_CACHE.md; Codex/catalog: ../CODEX_GATEWAY.md
+# See CONTEXT_CACHE.md, CODEX_GATEWAY.md and FILES_MEDIA.md for feature boundaries.
 server:
   host: 127.0.0.1
   port: 8787
@@ -16,7 +16,7 @@ server:
 
 upstream:
   # Existing transport service must be running and reachable from this process.
-  # This configuration does NOT provision a browser/oracle or bypass upstream access controls.
+  # This profile does not provision a browser or bypass upstream access controls.
   base_url: http://127.0.0.1:8790
   timeout: 0s
   dial_timeout: 10s
@@ -42,8 +42,7 @@ pool:
 
 facade:
   enabled: true
-  api_keys: [] # Required through OAI_PRISM_API_KEYS; empty keys prevent gateway startup.
-  # Replace the upstream model value with a model you have actually validated.
+  api_keys: [] # Set OAI_PRISM_API_KEYS; empty keys prevent gateway startup.
   default_model: prism-text
   models:
     prism-text:
@@ -63,35 +62,54 @@ facade:
     timeout: 6m
     max_concurrent: 8
     usage_policy: estimate
-    # These are explicit compatibility emulations, not upstream-native capabilities.
+    # Explicit compatibility emulation, not upstream-native constrained decoding.
     prompt_tools: true
     structured_output: true
     local_output_limit: true
-    # Enable for the tested Codex 0.160.0 function/custom/namespace contract.
-    # Client tools remain client-owned; this does not grant server execution.
+    # Tested Codex 0.160.0 function/custom/namespace contract; opt in explicitly.
+    # Files, shell, MCP and subprocesses still execute on the client, not here.
     codex_tools: false
     catalog:
       refresh_interval: 5m
       max_age: 1h
-      publish: [] # Explicit public model IDs; discovery never changes NewAPI prices.
+      publish: [] # Discovery never changes NewAPI pricing or permissions.
       sources: [] # One operator-owned source per existing account-pool ID.
-      # Example only after observing authorized metadata (see CODEX_GATEWAY.md):
       # sources:
       #   - name: account-a-models
       #     account_id: YOUR_EXISTING_ACCOUNT_POOL_ID
       #     path: /var/lib/oaiprism/catalog/account-a.json
       # publish: [YOUR_OBSERVED_PUBLIC_MODEL_ID]
-    # Images require authoritative upstream usage. Enable after a live contract check.
-    # Context-budget estimation with images is deliberately unsupported.
+
+    # Binary media requires authoritative upstream usage even with policy=estimate.
+    # Enable only after testing the actual upstream model/transport.
     inline_images: false
-    # Safe default when NewAPI shares one channel key across end users:
+    media:
+      # Zero means UNKNOWN. Positive reserves are operator-tested admission bounds,
+      # not tokenizer measurements or billing. Context checks fail without them.
+      image_reserve_tokens: 0
+      pdf_reserve_tokens: 0
+      pdf_models: [] # Public aliases whose upstream PDF file transport was verified.
+      max_images: 8
+      max_pdfs: 2
+    files:
+      # Shared channel keys alone cannot authorize per-user file storage.
+      # Requires trusted tenant_header + trusted_peers before enabling.
+      enabled: false
+      path: "" # Empty: memory only. For persistence use a SEPARATE SQLite path.
+      key_env: "" # Persistent files require base64 of 32 random bytes in this env.
+      ttl: 24h
+      owner_files: 64
+      owner_bytes: 33554432 # 32 MiB; each file is limited to 8 MiB.
+      total_bytes: 134217728 # 128 MiB; quotas reject rather than evict other owners.
+
+    # Safe default for NewAPI channels shared by multiple end users.
     response_store: false
     tenant_header: ""
     trusted_peers: []
     store_path: ""
     store_key_env: ""
     context:
-      # Must configure verified window_tokens or model_windows before enabling.
+      # Configure verified window_tokens or model_windows before enabling.
       enabled: false
       window_tokens: 0
       model_windows: {}
@@ -102,26 +120,26 @@ facade:
       keep_last_turns: 4
       summary_tokens: 1024
       max_summary_calls: 8
-      # A separate retention feature; store:false does not turn this off.
-      # Requires trusted tenant_header + trusted_peers before enabling.
+      # Retention feature independent of Responses store:false.
+      # Requires trusted tenant_header + trusted_peers.
       summary_cache: false
       cache_ttl: 30m
     prompt_cache:
-      # Account affinity only; never shares a mutable workspace or cached answer.
+      # Account affinity only; never shares mutable workspaces or cached answers.
       affinity: true
-      # Add public model aliases only after verifying native fields on the transport.
-      native_models: []
+      native_models: [] # Only aliases with verified upstream cache controls.
 
-# To enable response storage or summary caching, an authenticated reverse proxy
-# MUST overwrite the chosen tenant header with the real verified user ID.
-# Never forward a client-supplied value unchanged or use one static tenant for all.
-# Example identity/storage overrides, only after this contract is established:
-#   response_store: true
+# To enable files, response storage or summary caching, the authenticated proxy
+# MUST overwrite tenant_header with a verified END-USER identity. Do not forward
+# a client-supplied value unchanged or use one static tenant for all customers.
+# Example identity/response overrides only after establishing that contract:
 #   tenant_header: X-Verified-Tenant
 #   trusted_peers: ["127.0.0.1/32"]
+#   response_store: true
 #   store_path: /var/lib/oaiprism/responses.sqlite
 #   store_key_env: OAI_PRISM_RESPONSE_STORE_KEY
-# The referenced environment variable must contain base64 of 32 random bytes.
+# File persistence instead uses files.path and files.key_env; do not reuse the DB.
+# No official model cost/window is inferred from example values in this profile.
 
 capture:
   enabled: false
