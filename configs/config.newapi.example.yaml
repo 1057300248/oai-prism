@@ -2,6 +2,7 @@
 # workbench profile. It never exposes /admin, /dashboard or /prism routes.
 # Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
 # Supply your own authorized upstream credentials in the separately mounted file.
+# Context/cache behavior and activation: ../CONTEXT_CACHE.md
 server:
   host: 127.0.0.1
   port: 8787
@@ -67,6 +68,7 @@ facade:
     structured_output: true
     local_output_limit: true
     # Images require authoritative upstream usage. Enable after a live contract check.
+    # Context-budget estimation with images is deliberately unsupported.
     inline_images: false
     # Safe default when NewAPI shares one channel key across end users:
     response_store: false
@@ -74,11 +76,32 @@ facade:
     trusted_peers: []
     store_path: ""
     store_key_env: ""
+    context:
+      # Must configure verified window_tokens or model_windows before enabling.
+      enabled: false
+      window_tokens: 0
+      model_windows: {}
+      output_reserve: 4096
+      safety_margin: 1024
+      auto_compact: false
+      trigger_tokens: 0 # 0 means 80% of the effective input budget.
+      keep_last_turns: 4
+      summary_tokens: 1024
+      max_summary_calls: 8
+      # A separate retention feature; store:false does not turn this off.
+      # Requires trusted tenant_header + trusted_peers before enabling.
+      summary_cache: false
+      cache_ttl: 30m
+    prompt_cache:
+      # Account affinity only; never shares a mutable workspace or cached answer.
+      affinity: true
+      # Add public model aliases only after verifying native fields on the transport.
+      native_models: []
 
-# To enable response storage, an authenticated reverse proxy MUST overwrite the
-# chosen tenant header with the real verified user ID. Never forward a client-
-# supplied value unchanged. A shared/static header does not isolate end users.
-# Example overrides, only after this identity contract has been established:
+# To enable response storage or summary caching, an authenticated reverse proxy
+# MUST overwrite the chosen tenant header with the real verified user ID.
+# Never forward a client-supplied value unchanged or use one static tenant for all.
+# Example identity/storage overrides, only after this contract is established:
 #   response_store: true
 #   tenant_header: X-Verified-Tenant
 #   trusted_peers: ["127.0.0.1/32"]
