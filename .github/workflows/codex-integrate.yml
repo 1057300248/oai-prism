@@ -30,15 +30,15 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python tools/codex_integrate.py
           gofmt -w internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go tools/codex-fixture
+          python tools/codex_followup.py
+          gofmt -w internal/gateway internal/facade/gateway_adapter.go internal/server/catalog_e2e_test.go
           git diff --check
-      - name: Full Go verification
+      - name: Go and discovery regression suite
         run: |
           set -euo pipefail
           go vet ./...
           go test -count=1 -timeout 120s -json ./... > codex-tests.jsonl
-          go test -timeout 180s -race ./...
-          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oaiprism-amd64 ./cmd/oaiprism
-          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/oaiprism-arm64 ./cmd/oaiprism
+          node --test tools/model-catalog/normalize.test.mjs
       - name: Real Codex 0.160 client workflow
         run: |
           set -euo pipefail
@@ -49,13 +49,19 @@ jobs:
           export CODEX_FIXTURE_BIN="$RUNNER_TEMP/codex-fixture"
           export CODEX_EVIDENCE_DIR="$GITHUB_WORKSPACE/codex-evidence"
           python tools/codex_contract_test.py
+      - name: Race and production builds
+        run: |
+          set -euo pipefail
+          go test -timeout 180s -race ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oaiprism-amd64 ./cmd/oaiprism
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/oaiprism-arm64 ./cmd/oaiprism
       - name: Commit verified integration only
         run: |
           set -euo pipefail
-          rm tools/codex_integrate.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
+          rm tools/codex_integrate.py tools/codex_followup.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go tools/codex-fixture tools/codex_integrate.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
+          git add internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go internal/server/catalog_e2e_test.go tools/codex-fixture tools/codex_integrate.py tools/codex_followup.py .github/workflows/codex-integrate.yml .github/workflows/codex-workbench.yml
           git commit -m 'feat: integrate scoped model capabilities and verified Codex local tool contracts'
           git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
           git rev-parse HEAD > verified-codex-source.txt
