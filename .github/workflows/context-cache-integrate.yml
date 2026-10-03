@@ -23,7 +23,21 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python tools/context_cache_integrate.py
-          gofmt -w internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/server/context_cache_e2e_test.go
+          gofmt -w internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/prism/terminal_usage_test.go internal/server/context_cache_e2e_test.go
+          python tools/context_cache_followup.py
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('tools/context_sdk_test.py')
+          s=p.read_text()
+          assert s.count('with client.responses.with_raw_response.create')==1
+          s=s.replace('with client.responses.with_raw_response.create','raw_response = client.responses.with_raw_response.create')
+          assert s.count('}}) as raw_response:')==1
+          s=s.replace('}}) as raw_response:','}})')
+          assert s.count('    assert raw_response.')==2
+          s=s.replace('    assert raw_response.','assert raw_response.')
+          p.write_text(s)
+          PY
+          gofmt -w internal/gateway internal/prism/client.go tools/gateway-fixture/main.go
           git diff --check
       - name: Verify candidate source
         run: |
@@ -36,10 +50,10 @@ jobs:
       - name: Commit verified source only
         run: |
           set -euo pipefail
-          rm tools/context_cache_integrate.py .github/workflows/context-cache-integrate.yml
+          rm tools/context_cache_integrate.py tools/context_cache_followup.py .github/workflows/context-cache-integrate.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/server/context_cache_e2e_test.go tools/context_cache_integrate.py .github/workflows/context-cache-integrate.yml
+          git add internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/client.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/prism/terminal_usage_test.go internal/server/context_cache_e2e_test.go tools/gateway-fixture/main.go tools/context_sdk_test.py tools/context_cache_integrate.py tools/context_cache_followup.py .github/workflows/context-cache-integrate.yml
           git commit -m 'fix(gateway): complete budgeted compaction, scoped caching and usage accounting'
           git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
           git rev-parse HEAD > verified-context-source.txt
