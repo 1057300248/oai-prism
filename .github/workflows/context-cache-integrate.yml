@@ -1,0 +1,68 @@
+name: Context Cache Integration
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+    paths: [.github/workflows/context-cache-integrate.yml]
+permissions:
+  contents: write
+jobs:
+  integrate:
+    if: github.repository == '1057300248/oai-prism'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Guarded integration
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python tools/context_cache_integrate.py
+          gofmt -w internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/server/context_cache_e2e_test.go
+          git diff --check
+      - name: Verify candidate source
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -timeout 120s -count=1 -json ./... > context-cache-tests.jsonl
+          go test -timeout 180s -race ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oaiprism-amd64 ./cmd/oaiprism
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/oaiprism-arm64 ./cmd/oaiprism
+      - name: Commit verified source only
+        run: |
+          set -euo pipefail
+          rm tools/context_cache_integrate.py .github/workflows/context-cache-integrate.yml
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add internal/gateway internal/facade/gateway_adapter.go internal/prism/types.go internal/prism/usage.go internal/prism/cache_usage_test.go internal/server/context_cache_e2e_test.go tools/context_cache_integrate.py .github/workflows/context-cache-integrate.yml
+          git commit -m 'fix(gateway): complete budgeted compaction, scoped caching and usage accounting'
+          git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
+          git rev-parse HEAD > verified-context-source.txt
+      - name: Evidence summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import pathlib,json
+          p=pathlib.Path('context-cache-tests.jsonl')
+          ev=[json.loads(x) for x in p.read_text().splitlines()] if p.exists() else []
+          counts={a:sum(e.get('Action')==a and bool(e.get('Test')) for e in ev) for a in ['pass','fail','skip']}
+          print('RESULT',counts)
+          failed={e.get('Test') for e in ev if e.get('Action')=='fail'}
+          for e in ev:
+              if e.get('Test') in failed and e.get('Output'): print(e['Output'],end='')
+          pathlib.Path('context-test-counts.json').write_text(json.dumps(counts))
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: context-cache-evidence
+          path: |
+            verified-context-source.txt
+            context-cache-tests.jsonl
+            context-test-counts.json
+          retention-days: 3
