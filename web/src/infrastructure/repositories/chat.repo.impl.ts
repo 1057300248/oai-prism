@@ -60,6 +60,15 @@ export class ChatRepositoryImpl implements IChatRepository {
           ],
         };
         await this.saveSession(defaultSession);
+        // 引导欢迎语单独入库（消息持久化已从 saveSession 中拆出，
+        // 见 saveSession 注释 —— 否则每次完成流式都会全量重插）。
+        await httpClient.post(`/admin/chat/sessions/${defaultSession.id}/messages`, {
+          id: defaultSession.messages[0].id,
+          role: defaultSession.messages[0].role,
+          content: defaultSession.messages[0].content,
+          reasoning: '',
+          status: 'success',
+        });
         return [defaultSession];
       }
 
@@ -124,26 +133,19 @@ export class ChatRepositoryImpl implements IChatRepository {
 
   async saveSession(session: ChatSession): Promise<void> {
     try {
-      // 1. 持久化会话元数据至 SQLite
+      // 只持久化会话元数据（新建/改名/模型切换）。
+      //
+      // 消息持久化由 sendMessageStream 独占负责（它有流式生命周期，
+      // 分阶段写入 user / assistant）。这里如果再全量同步 messages，
+      // 会在每次流式完成后的 saveSession 调用里把同样的消息再插一遍
+      // —— 同一轮问答在会话里出现两组（2026-10-03 用户截图实证），
+      // 前端刷新后表现为重复的问答对。
       await httpClient.post('/admin/chat/sessions', {
         id: session.id,
         title: session.title,
         model: session.model,
         reasoning_effort: session.reasoningEffort,
       });
-
-      // 2. 持久化最新消息至 SQLite
-      if (session.messages && session.messages.length > 0) {
-        for (const m of session.messages) {
-          await httpClient.post(`/admin/chat/sessions/${session.id}/messages`, {
-            id: m.id,
-            role: m.role,
-            content: m.content,
-            reasoning: m.reasoning,
-            status: m.status,
-          });
-        }
-      }
     } catch {
       // 网络或接口异常
     }

@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+
+	"github.com/oai-prism/oaiprism/internal/prism"
 )
 
 // TestExtractExecBlock 覆盖围栏提取的三种形态。
@@ -417,5 +419,48 @@ func TestCustomToolCallItemJSON(t *testing.T) {
 	}
 	if m["input"] != "await tools.exec_command()" {
 		t.Errorf("input 应为 JS 源码字符串: %s", item)
+	}
+}
+
+// foldInputHistory 回归：上游只认「首 system + 最后一条消息」，
+// 桥模式多轮历史必须折叠进 system（否则 Codex 跨轮失忆，2026-10-03）。
+func TestFoldInputHistory(t *testing.T) {
+	mk := func(role, text string) prism.InputItem {
+		it := prism.NewUserItem(text)
+		it.Role = role
+		return it
+	}
+	items := []prism.InputItem{
+		prism.NewSystemItem("bridge-prompt"),
+		mk("user", "任务一"),
+		mk("assistant", "```codex-exec\nconst out = await tools.exec_command({cmd:'ls'});\n```"),
+		mk("user", "[CLIENT RESULT] file-list"),
+		mk("user", "任务二"),
+		prism.NewSystemItem("tail-reminder"),
+	}
+	got := foldInputHistory(items)
+	if len(got) != 3 {
+		t.Fatalf("期望 3 条（system + 本轮 user + tail），得到 %d", len(got))
+	}
+	sys := got[0].Content[0].Text
+	if !strings.Contains(sys, "[Previous Conversation History]") ||
+		!strings.Contains(sys, "任务一") ||
+		!strings.Contains(sys, "[CLIENT RESULT]") {
+		t.Fatalf("折叠历史缺失关键内容:\n%s", sys)
+	}
+	if !strings.Contains(sys, "bridge-prompt") {
+		t.Fatalf("桥指令丢失:\n%s", sys)
+	}
+	if got[1].Role != "user" || got[1].Content[0].Text != "任务二" {
+		t.Fatalf("最后一条消息应原样保留: %+v", got[1])
+	}
+	if got[2].Content[0].Text != "tail-reminder" {
+		t.Fatalf("尾部提醒应保留在末位: %+v", got[2])
+	}
+
+	// 短输入（system + user）不折叠。
+	two := []prism.InputItem{prism.NewSystemItem("s"), mk("user", "hi")}
+	if got2 := foldInputHistory(two); len(got2) != 2 {
+		t.Fatalf("两条输入不应折叠")
 	}
 }

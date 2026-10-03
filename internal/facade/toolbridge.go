@@ -138,6 +138,106 @@ func bridgePrompt() string {
 	}, "\n")
 }
 
+// foldInputHistory 把 input 的中间历史折叠进首条 system。
+//
+// 上游后端只提取「首条 system + 最后一条 user」，中间的 input 条目
+// 全部丢弃（translate.go 头注释记录的同一缺陷）。Codex CLI 每轮
+// 回传完整对话（往轮 user / assistant 工具调用块 / [CLIENT RESULT]
+// 工具结果），这些条目排在中间 —— 跨轮时全部被上游丢弃，表现为
+// Codex 失忆："不记得我刚刚让你干什么"（2026-10-03 用户实测）。
+//
+// 折叠策略与 chat.go 的 translate 一致：首条 system 与最后一条
+// 消息（本轮 user 或工具结果）保留，其余按 Speaker: text 折叠成
+// [Previous Conversation History] 文本追加进 system。尾部 system
+// （bridgeTailReminder）不是消息，跳过后保留在原位 —— 末尾指令
+// 服从度最高的性质不能丢。
+func foldInputHistory(items []prism.InputItem) []prism.InputItem {
+	if len(items) <= 2 {
+		return items
+	}
+	// 最后一条"消息"（跳过收尾的 system 提醒条目）。
+	lastIdx := len(items) - 1
+	for lastIdx > 0 && strings.EqualFold(items[lastIdx].Role, "system") {
+		lastIdx--
+	}
+	if lastIdx <= 1 {
+		return items
+	}
+
+	var sb strings.Builder
+	for i := 1; i < lastIdx; i++ {
+		it := items[i]
+		if strings.EqualFold(it.Role, "system") {
+			continue
+		}
+		speaker := "User"
+		switch strings.ToLower(it.Role) {
+		case "assistant":
+			speaker = "Assistant"
+		case "tool", "function":
+			speaker = "Tool"
+		}
+		var txt strings.Builder
+		for _, c := range it.Content {
+			txt.WriteString(c.Text)
+		}
+		if strings.TrimSpace(txt.String()) == "" {
+			continue
+		}
+		if sb.Len() > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(speaker)
+		sb.WriteString(": ")
+		sb.WriteString(txt.String())
+	}
+	if sb.Len() == 0 {
+		return items
+	}
+	history := "\n\n[Previous Conversation History]\n" + sb.String()
+
+	if strings.EqualFold(items[0].Role, "system") && len(items[0].Content) > 0 {
+		// 首条已是 system：历史追加进它的第一个文本块。
+		items[0].Content[0].Text += history
+		out := make([]prism.InputItem, 0, 2+1)
+		out = append(out, items[0])
+		out = append(out, items[lastIdx:]...)
+		return out
+	}
+	// 没有 system（罕见）：历史条目整体前插为一条 system。
+	out := make([]prism.InputItem, 0, 2+1)
+	out = append(out, prism.NewSystemItem("[Previous Conversation History]\n"+sb.String()))
+	out = append(out, items...)
+	return out
+}
+
+// osDirective 从客户端 User-Agent 推断操作系统，生成一段写进桥
+// system 的**硬性事实声明**。
+//
+// 为什么用"事实"而不是"指引"：bridgePrompt/tailReminder 里早已
+// 写满 "if Windows use PowerShell" 式的条件指引，实测模型照样在
+// Windows 上发 `cat > f <<'EOF'`（2026-10-03 Codex 首个文件操作
+// 即命中，PowerShell 报"重定向运算符后缺少文件规范"）。条件句给
+// 留了"我判断不准 OS"的空间；UA 是网关自己握有的确定事实，把它
+// 作为结论性陈述放在最前面，模型无从"再判断"。
+func osDirective(ua string) string {
+	l := strings.ToLower(ua)
+	switch {
+	case strings.Contains(l, "windows"):
+		return "CLIENT OS FACT (from client User-Agent): the client machine is Windows. " +
+			"exec_command runs in Windows PowerShell, which does NOT support bash syntax. " +
+			"NEVER use `cat > file`, `<<'EOF'` heredocs, or `printf >` — they fail instantly with " +
+			"\"重定向运算符后缺少文件规范\". To create/overwrite a file use exactly: " +
+			"`$c = @'...full content...'@; Set-Content -LiteralPath '<path>' -Value $c -NoNewline`. " +
+			"To read a file use `Get-Content -LiteralPath '<path>' -Raw`. To list a directory use `Get-ChildItem`."
+	case strings.Contains(l, "mac os"), strings.Contains(l, "macos"), strings.Contains(l, "darwin"):
+		return "CLIENT OS FACT (from client User-Agent): the client machine is macOS. exec_command runs in a POSIX shell (bash/zsh) — standard Unix syntax applies."
+	case strings.Contains(l, "linux"):
+		return "CLIENT OS FACT (from client User-Agent): the client machine is Linux. exec_command runs in bash — standard POSIX syntax applies."
+	}
+	return ""
+}
+
 // bridgeInputItems 把 Codex CLI 的 input 数组翻译成上游 input。
 //
 // 与 messagesFromResponsesInput 的区别：工具条目（custom_tool_call /
@@ -164,7 +264,12 @@ func bridgeInputItems(raw json.RawMessage, defaultSystem string) []prism.InputIt
 	}
 
 	items := make([]prism.InputItem, 0, len(blocks)+3)
-	items = append(items, prism.NewSystemItem(defaultSystem+"\n\n"+bridgePrompt()))
+	// OS 事实声明（可能为空）拼在桥指令最前面 —— 越靠前越是"背景事实"。
+	head := bridgePrompt()
+	if strings.TrimSpace(defaultSystem) != "" {
+		head = defaultSystem + "\n\n" + head
+	}
+	items = append(items, prism.NewSystemItem(head))
 
 	textOf := func(r json.RawMessage) string {
 		if len(r) == 0 {

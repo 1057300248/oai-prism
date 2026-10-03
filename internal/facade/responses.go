@@ -81,7 +81,8 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	)
 	input := messagesFromResponsesInput(req.Input, "")
 	if bridge {
-		input = bridgeInputItems(req.Input, "")
+		// UA 推断的 OS 事实声明随桥指令一起进首条 system（见 osDirective）。
+		input = bridgeInputItems(req.Input, osDirective(r.UserAgent()))
 	}
 	if !bridge {
 		if req.Instructions != "" {
@@ -91,6 +92,11 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 			input = append([]prism.InputItem{prism.NewSystemItem(h.cfg.Facade.DefaultSystemPrompt)}, input...)
 		}
 	}
+	// 历史折叠：上游只认「首条 system + 最后一条消息」，中间条目全被
+	// 丢弃（见 foldInputHistory 注释）。Codex 每轮回传完整 input，
+	// 不折叠就是跨轮失忆 —— 这是 chat 工作台有记忆而 Codex 没有的
+	// 原因（chat 走 translateChatMessages 自带折叠）。
+	input = foldInputHistory(input)
 	if len(input) == 0 {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", "input 不能为空")
 		return
