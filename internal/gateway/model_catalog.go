@@ -178,7 +178,7 @@ func (h *Handler) serveCatalog(w http.ResponseWriter, r *http.Request) bool {
 			if efforts, ok := entry["reasoning_efforts"].([]string); ok && len(efforts) > 0 {
 				model.ReasoningEfforts = efforts
 			}
-			result = append(result, CodexModel(model, h.options.CodexTools && h.options.PromptTools))
+			result = append(result, h.codexModelWithMedia(model))
 		}
 		writeJSON(w, 200, map[string]any{"models": result})
 		return true

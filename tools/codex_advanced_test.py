@@ -91,7 +91,7 @@ def main() -> None:
                     ('subagent', 'advanced-parallel', [], 'Explicitly spawn one child agent for the fixture check, wait for its result, then report completion.', 'SUBAGENT_ROUND_TRIP_COMPLETED'),
                 ]
                 for name, model, flags, prompt, expected in scenarios:
-                    command = [cli, 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '-C', str(work), '-c', 'model=' + json.dumps(model), *flags, prompt]
+                    command = [cli, 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '-C', str(work), '-c', 'model=' + json.dumps(model), *flags, '--', prompt]
                     try:
                         completed = subprocess.run(command, env=env, capture_output=True, text=True, timeout=100)
                         (evidence / (name + '-events.jsonl')).write_text(completed.stdout)
@@ -119,7 +119,7 @@ def main() -> None:
                         assert uploaded.id in [f.id for f in client.files.list(limit=10).data]
                         response = client.responses.create(model='advanced-files', input=[{'role': 'user', 'content': [{'type': 'input_file', 'file_id': uploaded.id}]}], store=True)
                         assert response.output_text == 'FILE_CONTENT_RECEIVED'
-                        with client.with_options(default_headers={'X-Fixture-Tenant': 'other-owner'}) as other:
+                        with OpenAI(api_key=KEY, base_url=BASE, default_headers={'X-Fixture-Tenant': 'other-owner'}, max_retries=0, timeout=15) as other:
                             try: other.files.retrieve(uploaded.id)
                             except NotFoundError: pass
                             else: raise AssertionError('Cross-tenant SDK file access')

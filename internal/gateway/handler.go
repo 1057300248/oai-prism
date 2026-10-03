@@ -256,7 +256,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if tail == "input_items" {
-			page, err := inputItemsPage(snapshot, r.URL.Query())
+			page, err := h.ownedInputItemsPage(r.Context(), snapshot, r.URL.Query(), owner)
 			if err != nil {
 				h.fail(w, r, nil, err)
 				return
