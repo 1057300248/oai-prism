@@ -1,0 +1,89 @@
+name: Advanced Codex Integration
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+    paths: [.github/workflows/advanced-integrate.yml]
+permissions:
+  contents: write
+concurrency:
+  group: advanced-codex-integration
+  cancel-in-progress: false
+jobs:
+  integrate:
+    if: github.repository == '1057300248/oai-prism'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref_name }}
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Integrate declared image catalog
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python - <<'PY'
+          from pathlib import Path
+          p=Path('internal/gateway/model_catalog.go')
+          s=p.read_text();old='result = append(result, CodexModel(model, h.options.CodexTools && h.options.PromptTools))'
+          assert s.count(old)==1
+          p.write_text(s.replace(old,'result = append(result, h.codexModelWithMedia(model))'))
+          PY
+          gofmt -w internal/gateway/media_catalog.go internal/gateway/model_catalog.go tools/codex-advanced-fixture
+          git diff --check
+          npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
+          python -m pip install openai==3.24.0
+          go build -o "$RUNNER_TEMP/advanced-fixture" ./tools/codex-advanced-fixture
+      - name: Actual Codex and Files SDK contracts
+        run: |
+          set -euo pipefail
+          export CODEX_CLI="$RUNNER_TEMP/codex-tools/node_modules/.bin/codex"
+          export CODEX_ADVANCED_BIN="$RUNNER_TEMP/advanced-fixture"
+          export CODEX_ADVANCED_EVIDENCE="$GITHUB_WORKSPACE/advanced-evidence"
+          bash tools/codex_ci_sandbox.sh python tools/codex_advanced_test.py
+      - name: Full regression gates
+        run: |
+          set -euo pipefail
+          go vet ./...
+          go test -timeout 180s -count=1 -json ./... > advanced-tests.jsonl
+          go test -timeout 240s -race ./...
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -trimpath -o /tmp/oaiprism-amd64 ./cmd/oaiprism
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -trimpath -o /tmp/oaiprism-arm64 ./cmd/oaiprism
+      - name: Commit tested catalog implementation
+        run: |
+          set -euo pipefail
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm .github/workflows/advanced-integrate.yml
+          git add internal/gateway/media_catalog.go internal/gateway/model_catalog.go tools/codex-advanced-fixture
+          git commit -m 'feat(codex): integrate tested image catalogs and advanced client contracts'
+          git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
+          git rev-parse HEAD > advanced-source.txt
+      - name: Evidence and diagnostics
+        if: always()
+        run: |
+          tail -120 advanced-evidence/failures.txt || true
+          python - <<'PY'
+          import pathlib,json
+          p=pathlib.Path('advanced-tests.jsonl')
+          es=[json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
+          print({a:sum(e.get('Action')==a and bool(e.get('Test')) for e in es) for a in ['pass','fail','skip']})
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: advanced-codex-evidence
+          path: |
+            advanced-evidence/
+            advanced-source.txt
+            advanced-tests.jsonl
+          retention-days: 3
