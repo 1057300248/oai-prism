@@ -1,7 +1,5 @@
-"""Pinned real Codex client + real gateway + fixed upstream plans.
-
-This validates transport and local execution, NOT model intelligence. No live
-model/API credentials are used; the only writable project is a disposable repo.
+"""Real pinned Codex + real gateway + fixed upstream plans, in a disposable repo.
+This proves protocol/execution contracts, not live model intelligence.
 """
 from __future__ import annotations
 import json
@@ -24,8 +22,24 @@ def get(path: str) -> bytes:
 def run(command: list[str], **kwargs) -> subprocess.CompletedProcess:
     result = subprocess.run(command, text=True, capture_output=True, timeout=90, **kwargs)
     if result.returncode:
+        directory = os.environ.get('CODEX_EVIDENCE_DIR')
+        if directory:
+            Path(directory).mkdir(parents=True, exist_ok=True)
+            (Path(directory) / 'failed-command.txt').write_text(result.stdout + '\nSTDERR:\n' + result.stderr)
         raise AssertionError(f'Command failed ({result.returncode}): {command}\n{result.stdout[-6000:]}\n{result.stderr[-6000:]}')
     return result
+
+def check_sandbox(cli: str, work: Path, parent: Path, env: dict[str, str], evidence: Path) -> None:
+    run([cli, 'sandbox', '-P', ':read-only', '-C', str(work), '--', '/bin/true'], env=env)
+    results = []
+    for profile, target in [(':read-only', work / 'readonly-denied.txt'), (':workspace', parent / 'outside-denied.txt')]:
+        command = [cli, 'sandbox', '-P', profile, '-C', str(work), '--', 'python3', '-c',
+                   f'from pathlib import Path; Path({str(target)!r}).write_text("must not write")']
+        result = subprocess.run(command, env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode != 0 and not target.exists(), f'Sandbox did not deny {profile} write'
+        assert 'Read-only file system' in result.stderr or 'Permission denied' in result.stderr, result.stderr
+        results.append({'profile': profile, 'write_denied': True, 'exit_code': result.returncode})
+    (evidence / 'sandbox-checks.json').write_text(json.dumps(results, indent=2))
 
 def main() -> None:
     cli = os.environ['CODEX_CLI']
@@ -52,7 +66,6 @@ def main() -> None:
         (work / 'calc.py').write_text(bad)
         report = evidence / 'gateway-turns.jsonl'
         if report.exists(): report.unlink()
-        # Do not pass GitHub/model credentials to the fixture or tool subprocess.
         env = {k: v for k, v in os.environ.items() if k in {'PATH', 'HOME', 'LANG', 'LC_ALL', 'TMPDIR', 'USER', 'SHELL'}}
         env.update(CODEX_HOME=str(home), FIXTURE_KEY=KEY, CODEX_FIXTURE_WORKDIR=str(work), CODEX_FIXTURE_REPORT=str(report))
         with (evidence / 'fixture.log').open('w') as logfile:
@@ -71,21 +84,20 @@ def main() -> None:
                 config = '\n'.join([
                     'model_provider = "fixture"', 'model = "codex-fixture"',
                     'model_reasoning_effort = "medium"', 'web_search = "disabled"',
-                    'approval_policy = "never"', # cannot grant an escalation in CI
+                    'approval_policy = "never"',
                     'model_catalog_json = ' + json.dumps(str(catalog_path)),
                     '[model_providers.fixture]', 'name = "fixture"',
                     'base_url = "' + BASE + '"', 'wire_api = "responses"', 'env_key = "FIXTURE_KEY"',
                 ]) + '\n'
                 (home / 'config.toml').write_text(config)
-                cmd = [cli, 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '-C', str(work),
-                       'Read calc.py, fix add using apply_patch, then run the unit tests. Follow AGENTS.md.']
-                result = run(cmd, env=env)
+                check_sandbox(cli, work, base, env, evidence)
+                result = run([cli, 'exec', '--json', '--ephemeral', '--sandbox', 'workspace-write', '-C', str(work),
+                              'Read calc.py, fix add using apply_patch, then run the unit tests. Follow AGENTS.md.'], env=env)
                 (evidence / 'edit-events.jsonl').write_text(result.stdout)
                 (evidence / 'edit-stderr.txt').write_text(result.stderr)
                 assert (work / 'calc.py').read_text() == good, 'CLI did not apply the patch locally'
                 run(['python3', '-m', 'unittest', '-v'], cwd=work, env=env)
                 changed = run(['git', '-C', str(work), 'status', '--porcelain']).stdout
-                # A fixed file matches baseline; only bytecode may be untracked.
                 assert 'test_calc.py' not in changed and 'AGENTS.md' not in changed, changed
                 turns = [json.loads(line) for line in report.read_text().splitlines()]
                 edits = [t for t in turns if t['model'] == 'codex-fixture']
@@ -93,7 +105,6 @@ def main() -> None:
                 assert edits[1]['returned_calls'][0]['name'] == 'apply_patch'
                 last = json.dumps(edits[-1]['received_outputs'][-1])
                 assert 'OK' in last and 'Process exited with code 0' in last, last
-                # Local review against a deliberately reintroduced bad diff.
                 shutil.rmtree(work / '__pycache__', ignore_errors=True)
                 (work / 'calc.py').write_text(bad)
                 before = {p.name: p.read_bytes() for p in work.iterdir() if p.is_file()}
@@ -109,7 +120,9 @@ def main() -> None:
                 assert [t['prior_outputs'] for t in reviews] == [0, 1], reviews
                 summary = {'codex_version': version, 'upstream': 'deterministic localhost fixture',
                            'read_file': True, 'custom_apply_patch': True, 'client_unit_tests': True,
-                           'review_diff': True, 'review_worktree_unchanged': True, 'live_model_validated': False}
+                           'review_diff': True, 'review_worktree_unchanged': True,
+                           'readonly_write_denied': True, 'outside_workspace_write_denied': True,
+                           'live_model_validated': False}
                 (evidence / 'summary.json').write_text(json.dumps(summary, indent=2))
                 print(json.dumps(summary, indent=2))
             finally:
