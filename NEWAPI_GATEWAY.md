@@ -1,16 +1,14 @@
 # NewAPI 网关接入与兼容性说明
 
-本分支只修改 `1057300248/oai-prism`。不需要修改 NewAPI 源码；未部署生产，未读取生产账号，未执行真实上游推理。这里的“兼容”是有边界、可测试的协议兼容，不是宣称 Prism 内部服务等同于原生 OpenAI API。
+本分支只修改 `1057300248/oai-prism`，未合并 master、未部署生产、未读取生产凭据或调用真实付费上游。基本 Chat/Responses 接入与服务器端自动摘要不需要修改 NewAPI 源码；新端点/字段能否被定制 NewAPI 转发仍需按其实际版本核对。
 
-## 交付来源
+**上下文压缩与缓存现已实现，具体行为、开关、使用示例和计费边界见 [CONTEXT_CACHE.md](CONTEXT_CACHE.md)。** 它不是 OpenAI 原生加密 compaction，也不保证真实 Prism 缓存命中。
 
-基线为 `master@a0bc201cc70e52e8a1fda3059b6c9d14ad8c8f89`，工作分支为 `codex/newapi-native-hardening-20261003`，PR #1。
+## 交付与恢复来源
 
-上一轮公司电脑的未提交工作树在本轮开始时离线。本分支通过 GitHub API 和 GitHub Actions 重建、扩充、测试并提交，不是对那份离线工作树的逐字节同步。电脑恢复后应对比差异，不要 reset 或覆盖未提交内容。
+基线 `master@a0bc201cc70e52e8a1fda3059b6c9d14ad8c8f89`；工作分支 `codex/newapi-native-hardening-20261003`；PR #1。公司电脑离线时通过 GitHub API/Actions 重建并验证，不是对 Windows 未提交工作树逐字节同步。电脑恢复后应先对比未提交改动，不能 reset 覆盖。
 
-## 1. 网关模式与旧工作台分开
-
-新配置是：
+## 1. 网关与个人工作台分开
 
 ```yaml
 facade:
@@ -19,119 +17,80 @@ facade:
     enabled: true
 ```
 
-注意：不是上一轮离线草稿的 `gateway_mode` 字段。
+这是当前嵌套配置，不是早期离线草稿的 gateway_mode。开启后不注册 `/admin/*`、`/dashboard/*`、`/prism/*`；禁止 X-Local-Workspace、X-Oaiprism-*、X-Prism-* 和 Sentinel 覆盖头。公共渠道 Key 不获得账号管理、指定私有上游状态、任意服务器目录读写或原始代理能力。
 
-开启后，公共渠道不注册 `/admin/*`、`/dashboard/*` 和 `/prism/*`，不接受 `X-Local-Workspace`、`X-Oaiprism-*`、`X-Prism-*` 或 Sentinel 覆盖头。公共 Key 不能管理账号、选择任意上游账号、读写服务器目录或调用原始代理。
+旧工作台模式仍保留，但不因此获得公共多租户安全保证；HTTP触发服务器本地工作区写文件的旧路径已删除。
 
-旧个人工作台模式仍保留，但不能据此认为它适合公开多租户运营。HTTP 请求触发服务器本地工作区写文件的旧路径已删除。
+默认不保存 Responses 历史，也不根据首句/user/cache标签偷偷拼接缓存历史。开启摘要仅处理本次显式输入或已通过所有者校验的 previous_response_id 历史；prompt_cache_key 是调度/缓存提示，不是用户身份。
 
-网关默认无状态：上下文只来自本次显式 input/messages，不使用相同首句、user、prompt_cache_key 或 metadata.session_id 自动拼接缓存历史。
+## 2. 能力与限制
 
-## 2. 能力表
-
-| 能力 | 实现与边界 |
+| 能力 | 实现和边界 |
 |---|---|
-| Chat Completions 同步/流式 | 标准返回结构、工具调用结束原因、可选 usage-only 末帧和成功时单个 `[DONE]` |
-| Responses 同步/流式 | 稳定 response/item/call ID，单调 sequence_number，added/delta/done/terminal 事件 |
-| 字符串/消息数组、多轮文本 | 字符串不拆字符；完整历史显式传递。内部协议对历史有损，因此适配层把角色化历史作为 user 数据传入，不提升为 system 指令 |
-| Function calling | 显式开启 `prompt_tools`；提示词适配 + 声明/参数 JSON Schema 校验。不是原生约束解码，服务器不执行函数 |
-| 工具结果续接 | Chat tool_calls/tool 与 Responses function_call/function_call_output，校验 call_id；调用方负责执行函数并回传结果 |
-| tool_choice / parallel_tool_calls | 支持 auto/none/required/指定声明函数；返回违反选择规则或禁止并行规则时失败 |
-| JSON object / JSON Schema | 开启 `structured_output` 后提示词引导，再用 JSON Schema 校验；不合法输出失败，不伪装成功 |
-| 输出长度参数 | 开启 `local_output_limit` 后兼容 max_tokens/max_completion_tokens/max_output_tokens，采用本地 o200k_base 可见输出裁剪。不是上游生成上限，不包含隐藏推理的硬限制 |
-| stop | Chat 文本输出的本地停止字符串处理；不与工具适配混用 |
-| Responses 存储/续接 | 可选，有所有者隔离、不可变快照、TTL 和容量限制；读取、删除及 input_items 分页 |
-| 图片输入 | 可选 `inline_images`，只接受校验过的内联 base64 PNG/JPEG/GIF/WebP；需要上游实报 usage。默认关闭 |
-| 模型发现 | `/v1/models`、`/v1/models/{id}`，只接受配置内模型 |
-| 能力发现 | `/v1/capabilities` 明确返回适配方式与开关 |
-| 采样参数 | temperature、top_p、seed、penalties 等未验证上游语义的控制返回 400，不静默忽略 |
-| 其他能力 | 远程图片 URL、音频/视频/文件输入、embeddings、hosted tools、后台生成、encrypted reasoning、任意 item_reference 暂不支持 |
+| Chat Completions | 同步/流式、工具结束原因、可选usage-only末帧、成功时单个DONE |
+| Responses | 同步/流式、稳定response/item/call ID、单调序号和完整生命周期事件 |
+| 文本历史 | 统一稳定JSON-lines渲染；去除分页UUID；保持工具关联和角色，历史数据不提升为系统指令 |
+| Function calling | 开启prompt_tools后提示词适配+声明与Schema校验；支持工具结果、选择及并行约束；服务器不执行函数 |
+| JSON结构化输出 | 开启structured_output后提示词引导+JSON/Schema校验；不是原生约束解码 |
+| max_tokens等输出限制 | 开启local_output_limit后按本地o200k_base可见输出裁剪；不限制上游实际生成或隐藏推理费用 |
+| Chat stop | 本地停止字符串处理，不与工具适配混用 |
+| 上下文预算/摘要 | 可配置模型窗口、输出预留、阈值、保留最近轮次；完整工具组边界；多窗口分块摘要；失败不丢原历史 |
+| compact/input_tokens | `/v1/responses/compact` 返回明确标注的普通摘要消息，不伪造encrypted_content；input_tokens为本地估算 |
+| 摘要缓存 | 可选、可信租户隔离、不可变前缀、单次并发构建、TTL/容量限制；不冒充上游KV缓存 |
+| Prompt Cache控制 | 作用域化key用于账号亲和；native_models白名单控制原生字段透传；不保证上游命中 |
+| Responses存储 | 可选所有者隔离、不可变快照、读取/删除/previous_response_id/input_items分页；可选加密SQLite |
+| 内联图片 | 开启inline_images后只接受校验过的base64 PNG/JPEG/GIF/WebP，要求权威usage；不能与本地图片token预算混用 |
+| 模型/能力发现 | `/v1/models`、`/v1/models/{id}`、`/v1/capabilities` |
+| 未支持 | 未验证的采样参数、远程图片URL、音视频/文件输入、embeddings、hosted tools、background、encrypted reasoning、任意item_reference |
 
-工具、结构化输出、本地输出上限和 stop 使用缓冲校验：等待期间发送 SSE 注释心跳，输出通过校验后再发送。工具 arguments 可以作为一个完整 delta 返回；不伪造逐 token 的生成速度。
+工具、结构化输出和本地输出控制采用缓冲校验，通过后才发出内容；等待时有SSE心跳，不伪造逐token生成速度。摘要发生在最终生成之前，额外调用会计入用量明细。格式不符或模型拒绝可能返回失败，不能伪造合法工具结果。
 
-遇到拒绝回答或非预期工具/JSON 格式，适配层可能返回失败，而不是推测并伪造合法工具调用。模型遵从率属于真实上游验收项目。
+## 3. NewAPI配置
 
-## 3. NewAPI 接入
-
-从 `configs/config.newapi.example.yaml` 复制私有配置，设置经验证的 Prism 模型名和独立的上游凭据文件。启动前通过环境变量设置随机渠道 Key：
+复制 [configs/config.newapi.example.yaml](configs/config.newapi.example.yaml) 到私有配置路径，填入已验证的模型名、独立凭据文件，并设置随机渠道Key：
 
 ```bash
 export OAI_PRISM_API_KEYS='REPLACE_WITH_A_RANDOM_CHANNEL_KEY'
 ./oaiprism serve -config /etc/oaiprism/gateway.yaml
 ```
 
-网关配置默认绑定 `127.0.0.1:8787`。生产服务器上浏览器/传输桥必须单独运行并对网关可达；配置文件不会自动创建浏览器会话，也不会使失效的上游凭据恢复有效。
+NewAPI采用OpenAI类型渠道，Base URL通常填网关origin（例如http://127.0.0.1:8787），渠道Key使用上述私有Key，模型选公开配置名。检查最终路径为 `/v1/chat/completions` 或 `/v1/responses`，避免双重v1。SDK直连base_url应含v1。
 
-NewAPI 侧通常使用 OpenAI 类型渠道，将地址设为网关 origin，例如 `http://127.0.0.1:8787`，渠道 Key 填 `OAI_PRISM_API_KEYS` 中的一条，对外模型选配置中的 `prism-text`。检查 NewAPI 最终请求路径是 `/v1/chat/completions` 或 `/v1/responses`，避免拼成 `/v1/v1/...`。SDK 直连的 base_url 则应包含 `/v1`。
+容器内的127.0.0.1不是宿主机，应配置私有网络可达地址；不要为方便连接把网关、传输桥或浏览器服务无鉴权暴露公网。上游浏览器/传输服务需要单独正常运行，配置不会自动创建有效会话或绕过上游控制。
 
-当 NewAPI 在容器中时，容器内 `127.0.0.1` 不是宿主机；应使用私有容器网络地址或受限宿主机地址。不要为解决可达性而把网关、8790 桥或8791服务无鉴权开放到公网。
+首次接入保持response_store:false、summary_cache:false、inline_images:false。需要自动摘要时按真实上游容量配置context窗口并显式开启；不能凭公开模型别名猜窗口。原生缓存字段只对真实验证过的native_models启用。
 
-首次使用建议保持：
+内部自动摘要不依赖客户端新端点，但压缩可能增加延迟和模型费用。独立compact/input_tokens端点及context_management请求字段是否通过NewAPI路由需另验，本项目不会假定转发成功。
 
-```yaml
-facade:
-  gateway:
-    response_store: false
-    usage_policy: estimate
-    prompt_tools: true
-    structured_output: true
-    local_output_limit: true
-    inline_images: false
-```
+## 4. 所有者隔离和存储
 
-这允许共享渠道 Key 下的无状态请求。Responses 客户端每轮发送完整历史并显式 `store:false`；不要发送 previous_response_id，除非已经建立下面的可信租户身份链路。
+多个最终用户可能共用同一渠道Key，因此开启response_store或summary_cache要求可信租户头和真实TCP对端CIDR。反代必须基于已经验证的最终用户身份**覆盖**头，不能原样转发用户自填值，也不能给所有人相同静态值；X-Forwarded-For不建立信任。没有此条件就保持这两种存储关闭，使用显式历史和无缓存摘要。
 
-## 4. Responses 所有权与持久化
+Responses默认内存，可选AES-256-GCM加密SQLite。配置store_path与store_key_env后，变量必须包含32随机字节的base64。密钥错误或密文损坏明确失败；更换渠道Key/租户ID/加密密钥不会自动迁移旧快照。
 
-一个 NewAPI 渠道 Key 往往被多个终端用户共用，因此它本身不足以隔离存储状态。启用 response_store 必须同时配置：
+Responses快照TTL30分钟、最多512条、总预算64MiB、单条20MiB；历史分支不可变。input_items只列该响应输入，不含刚生成的输出，支持after、limit(1..100/默认20)、order(asc/desc/默认desc)。上下文压缩后的输入项仍有有效分页ID。
 
-```yaml
-facade:
-  gateway:
-    response_store: true
-    tenant_header: X-Verified-Tenant
-    trusted_peers: ["127.0.0.1/32"]
-    store_path: /var/lib/oaiprism/responses.sqlite
-    store_key_env: OAI_PRISM_RESPONSE_STORE_KEY
-```
+摘要缓存是另外的进程内缓存，最多128条/8MiB，默认TTL30分钟，重启失效；SQLite Responses存储不是多节点Redis集群。多个实例需要明确一致的状态拓扑，不能让独立内存实例随机接力previous_response_id。
 
-可信反向代理必须用服务端已验证身份**覆盖**租户头，不能原样透传用户提供的头，也不能给所有用户填同一个静态值。真实 TCP peer 必须命中 trusted_peers；X-Forwarded-For 不能自行建立信任。缺少头、重复头或不可信 peer 均拒绝。
+store:false只控制Responses快照，不关闭运营者单独启用的summary_cache。网关模式跳过工作台正文审计和journal；这不是对上游、外层代理或整个系统零留存的承诺，TTL/删除也不是物理擦除保证。
 
-不具备这条身份链路时，继续用无状态模式即可，无须改 NewAPI 源码。不要为了开启 previous_response_id 而绕过所有权校验。
+## 5. 用量与失败处理
 
-store_key_env 指定的变量须包含32随机字节的 base64。密钥错误或密文损坏会明确失败。保持密钥与数据库分离备份；更换密钥、渠道 Key 或租户 ID 后原快照不会自动迁移到新身份。
+estimate模式优先用上游实报，缺失则使用明确标注的本地估算；upstream_only缺少可靠用量时失败。cached_tokens、cache_write_tokens和reasoning_tokens仅在上游提供时返回，严格检查整数、范围、总和与别名冲突，不从本地缓存命中推算。
 
-存储默认内存，可选 AES-256-GCM 加密 SQLite。TTL30分钟、最多512条、总预算64MiB、单快照20MiB。到期、淘汰、无权限或不存在都不能静默续聊；同一旧响应的两个分支使用不可变快照。SQLite 面向单主机，不是多节点 Redis 集群。多实例必须使用明确一致的存储拓扑；不支持靠随机负载均衡让独立内存实例共享 previous_response_id。
+已修复带request_id的typed响应分支丢失payload.usage的问题。输入预算/估算与实际发送的网关渲染共享实现，但Prism隐藏模板与推理仍可能不可见。
 
-GET input_items 只返回该响应的输入，不包含该响应刚生成的输出。支持 after、limit(1..100，默认20)、order(asc/desc，默认desc)，未知查询参数明确拒绝。
+自动摘要成功时标准usage合计本次摘要调用与最终生成，并附x_oaiprism_context明细；来源可能upstream/estimated/mixed。本地摘要缓存命中不重复计入先前构建成本，也不是模型缓存折扣。独立compact只计本次摘要调用，无新调用为0。无法从失败/断连且无用量的请求恢复官方完整账单。
 
-`store:false` 表示网关不建立 Responses 历史快照；网关模式也跳过工作台正文审计/journal。它**不是**对上游服务、外层代理、操作系统或其他系统零数据留存的承诺。数据库删除和TTL不等于取证级物理擦除。
+来源与上下文统计通过正文扩展和响应头/trailer输出；代理可能丢trailer，不能只靠头做账。生产NewAPI可能忽略扩展或使用不同缓存写入计价，本分支没有现场验收预扣/结算/退款。启用自动摘要前必须确定业务费用处理规则。
 
-## 5. usage 与计费
+## 6. 运维与测试
 
-`estimate` 优先保留上游实报 usage；缺失时按 o200k_base 对可见输入/输出估算，并返回 `usage.x_oaiprism_source=estimated`。`upstream_only` 在没有可靠实报数据时失败，不编造用量。
+请求期限覆盖账号选择、项目/沙箱、start/poll及摘要；保留客户端更早deadline。已接受生成不换账号重跑，非幂等POST不在结果未知后盲目重试；断开后尽力停止已知且未结束的上游任务。每请求隔离项目和可变工作区，缓存账号亲和不取消隔离。建议从每账号并发1实测吞吐，不能把缓存优化等同于已实现高并发。
 
-缓存与推理明细仅在上游明确提供时返回；未知不等于0。计数类型、范围、总数和明细关系都检查，非法值不能进入成功计费数据。上游实报用量不会因为本地输出裁剪而被擅自减小。
+SSE心跳5秒、写期限30秒，短写/Flush错误传播；失败不发成功终态。创建项目等首包前阶段需要外层代理足够响应头超时。禁用代理SSE缓冲、缓存和开始输出后的重试。
 
-估算不等于官方账单：Prism 的模板、隐藏推理、工具适配额外生成和图片成本可能不可见。图片缺少权威 usage 时失败，不能把 base64 长度当图片 token 成本。
-
-响应包含 `X-Oaiprism-Usage-Policy`；实际来源通过 JSON usage 扩展字段和 `X-Oaiprism-Usage-Source` 返回，流式场景来源头是 HTTP trailer。中间代理可能丢弃 trailer，因此不能仅靠它做账单判断。
-
-NewAPI 可能忽略扩展 provenance 字段。应给估算渠道单独配置并披露计费规则，实际检查成功/中断/失败时的预扣、结算和退款日志。此分支没有修改或验收生产 NewAPI 的账务逻辑。
-
-## 6. 稳定性与运维
-
-请求期限覆盖账号获取、项目创建、沙箱准备、start 和 poll；客户端更早的 deadline 被保留。已被上游接受的请求不换账号重跑；非幂等 POST 不在传输未知结果后盲目重试。上游停止使用独立短超时，只有尚未结束的已知生成才尽力停止。
-
-网关按账号串行隔离可变工作区，每个请求使用新项目并失效本地沙箱缓存。这优先保证隔离，可能增加冷启动成本；不能将原工作台的每账号高并发设置当成已验证吞吐。建议从每账号 MaxConcurrency=1 开始，并在实测后调整账号池规模。
-
-SSE 使用5秒注释心跳、30秒写入期限、短写/Flush错误检测，语义事件不会在 terminal 后继续发。上游接受前保留真正HTTP错误码；因此项目/沙箱冷启动期间仍需要外层代理足够长的响应头超时。关闭代理响应缓冲和SSE缓存，不重试已经开始的事件流。
-
-`/healthz` 只代表进程存活；`/readyz` 在没有可用账号时503，但不执行真实生成，不能证明浏览器桥或模型端点完全可用。`/metrics` 仅允许内网监控访问。进程关闭会停止 Runner 的维护循环并关闭存储句柄。
-
-项目、沙箱和凭据的上游资源生命周期仍由原传输层及上游控制。生产前需要观察实际资源回收和持续运行表现，不应仅凭内存缓存清空就宣称云端容器已销毁。
-
-## 7. 可复现验证
+healthz是进程存活；readyz检查可用账号但不做真实生成，不能证明浏览器桥/模型全链路可用。metrics仅供内网监控。Runner维护循环和存储在关闭时释放，摘要缓存关闭后不再接受或重新填充工作；本地失效缓存不代表上游沙箱已物理销毁。
 
 ```bash
 go vet ./...
@@ -140,27 +99,24 @@ go test -timeout 180s -race ./...
 CGO_ENABLED=0 go build -trimpath -o oaiprism ./cmd/oaiprism
 ```
 
-GitHub Actions 的 Gateway Cloud Verification、原 CI 和 Official SDK Contract 分别保留Go测试/编译、前端检查、官方SDK证据。SDK固定Python openai 3.24.0和JavaScript openai 7.27.0。`tools/gateway-fixture`只绑定回环地址、返回固定模拟响应，不是生产模型服务。
+GitHub Actions保留Go、竞态、双架构、Dashboard、官方Python/JavaScript SDK测试。SDK使用localhost固定fixture，不调用真实模型。旧证据见 [GATEWAY_VERIFICATION.md](GATEWAY_VERIFICATION.md)，新压缩/缓存说明见 [CONTEXT_CACHE.md](CONTEXT_CACHE.md)；最新结果以PR当前HEAD的Checks为准。
 
-测试包含事件ID/序号/收尾、真假失败、取消传播、禁止接受后重跑、工具schema与call_id、响应所有者隔离、快照分支/TTL/删除、加密存储重启/错误密钥、请求大小与短写、JSON Schema外部资源禁止，以及原审计中间件1MiB截断回归。
+CI不能证明真实摘要事实完整性、模型遵从率、原生加密压缩可用、真实缓存命中、官方账单、沙箱回收、生产网络或长期SLA。未进行生产部署。
 
-CI通过只能证明被测协议和代码路径。真实Prism模型遵从率、沙箱隔离/回收、图片实报用量、长时间稳定性、实际NewAPI账务和公网网络链路均是独立的现场验收项。本轮未用生产凭据执行这些检查。
+## 7. Fork核查记录（2026-10-03）
 
-## 8. Fork 核查（2026-10-03）
-
-| 仓库 | 核查HEAD | 结论 |
+| 仓库 | 核查HEAD | 结果 |
 |---|---|---|
-| devImpChen/oai-prism | 2b69c4dc9a20ce0d6c4bd535e33a168b941c436c | 较早上游快照，不是完整原生兼容证据 |
+| devImpChen/oai-prism | 2b69c4dc9a20ce0d6c4bd535e33a168b941c436c | 较早上游快照 |
 | xuseny/oai-prism | f3d4c3cd3f2c3feb3885f55d3f983f22ae93f24b | 较早停止脚本修改 |
-| EmpFish01/oai-prism | ef8854f223b83eac49cbbfe20866f8ed8803a01a | 浏览器sidecar、登录向导、可迁移/会话化启动有参考价值；实际Responses代码仍消费但不执行部分参数，并直接接受私有上游响应ID |
+| EmpFish01/oai-prism | ef8854f223b83eac49cbbfe20866f8ed8803a01a | 浏览器/登录/部署便利性有参考价值，但已读Responses实现不能证明完整原生参数和多租户语义 |
 
-部署完整不等于协议和多租户完整。本次没有从以上fork整包复制，也没有证据断言其他未核查fork都不完整。保留原作者归属；GitHub元数据未识别原项目许可证，不能自行宣布原作者代码为MIT或重新授权。
+未整包复制上述fork，也不断言未核查fork全部不完整。保留原作者归属；原项目GitHub元数据未识别许可证，不自行声明原作者代码为MIT或重新授权。
 
-## 一手协议参考
-
+一手参考：
 - https://developers.openai.com/api/docs/guides/function-calling
 - https://developers.openai.com/api/docs/guides/streaming-responses
 - https://developers.openai.com/api/docs/guides/structured-outputs
-- https://developers.openai.com/api/reference/java/resources/responses/subresources/input_items/methods/list
+- https://developers.openai.com/api/docs/guides/compaction
+- https://developers.openai.com/api/docs/guides/prompt-caching
 - https://docs.newapi.pro/en/docs/guide/feature-guide/admin/channel
-- https://docs.newapi.pro/en/docs/api/ai-model/chat/openai/createresponse
