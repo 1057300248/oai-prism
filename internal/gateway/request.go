@@ -75,9 +75,9 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
-	allowed := "model stream store metadata user safety_identifier prompt_cache_key tools tool_choice parallel_tool_calls"
+	allowed := "model stream store metadata user safety_identifier prompt_cache_key prompt_cache_retention prompt_cache_options tools tool_choice parallel_tool_calls"
 	if responses {
-		allowed += " input instructions previous_response_id reasoning text max_output_tokens background truncation include"
+		allowed += " input instructions previous_response_id reasoning text max_output_tokens background truncation include context_management"
 	} else {
 		allowed += " messages stream_options reasoning_effort response_format max_tokens max_completion_tokens stop n logprobs"
 	}
@@ -135,7 +135,7 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 					}
 				}
 			}
-		case "user", "safety_identifier", "prompt_cache_key":
+		case "user", "safety_identifier":
 			var value string
 			err = scalar(raw, &value, k)
 			if len(value) > 512 {
@@ -343,6 +343,9 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 		q.Items, err = parseItems(raw, responses, o)
 	}
 	if err != nil {
+		return nil, err
+	}
+	if err := parseContextCache(m, q, o, responses); err != nil {
 		return nil, err
 	}
 	return q, nil

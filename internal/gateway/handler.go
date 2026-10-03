@@ -21,12 +21,13 @@ import (
 )
 
 type Handler struct {
-	options Options
-	engine  Engine
-	store   *responseStore
-	keys    [][32]byte
-	peers   []*net.IPNet
-	slots   chan struct{}
+	summaries *summaryCache
+	options   Options
+	engine    Engine
+	store     *responseStore
+	keys      [][32]byte
+	peers     []*net.IPNet
+	slots     chan struct{}
 }
 
 func New(o Options, engine Engine) (*Handler, error) {
@@ -36,7 +37,7 @@ func New(o Options, engine Engine) (*Handler, error) {
 	if engine == nil {
 		return nil, errors.New("gateway engine is required")
 	}
-	h := &Handler{options: o, engine: engine}
+	h := &Handler{options: o, engine: engine, summaries: newSummaryCache()}
 	for _, key := range o.APIKeys {
 		if key = strings.TrimSpace(key); key != "" {
 			h.keys = append(h.keys, sha256.Sum256([]byte(key)))
@@ -61,7 +62,7 @@ func New(o Options, engine Engine) (*Handler, error) {
 	}
 	return h, nil
 }
-func (h *Handler) Close() error { return h.store.Close() }
+func (h *Handler) Close() error { h.summaries.clear(); return h.store.Close() }
 func (h *Handler) owner(r *http.Request) (string, error) {
 	key := ""
 	auths := 0
@@ -157,7 +158,21 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.method(w, "GET")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
+		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "context": h.contextCapabilities(), "prompt_cache": h.cacheCapabilities(), "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
+		return
+	case path == "/v1/responses/compact" || path == "/responses/compact":
+		if r.Method != "POST" {
+			h.method(w, "POST")
+			return
+		}
+		h.contextEndpoint(w, r, owner, false)
+		return
+	case path == "/v1/responses/input_tokens":
+		if r.Method != "POST" {
+			h.method(w, "POST")
+			return
+		}
+		h.contextEndpoint(w, r, owner, true)
 		return
 	case path == "/v1/chat/completions" || path == "/chat/completions":
 		if r.Method != "POST" {
@@ -257,6 +272,12 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, s *stream, err er
 	writeJSON(w, api.Status, errorBody(api))
 }
 func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string, responses bool) {
+	timeout := h.options.Timeout
+	if timeout == 0 {
+		timeout = 10 * time.Minute
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
+	defer cancel()
 	// Bound request-body allocation and schema compilation, not just inference.
 	select {
 	case h.slots <- struct{}{}:
@@ -300,7 +321,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		return
 	}
 	if q.PreviousID != "" {
-		snapshot, ok, e := h.store.Get(r.Context(), q.PreviousID, owner)
+		snapshot, ok, e := h.store.Get(ctx, q.PreviousID, owner)
 		if e != nil {
 			h.fail(w, r, nil, e)
 			return
@@ -330,12 +351,6 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		h.fail(w, r, nil, err)
 		return
 	}
-	timeout := h.options.Timeout
-	if timeout == 0 {
-		timeout = 10 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(r.Context(), timeout)
-	defer cancel()
 	idPrefix := "chatcmpl-"
 	if responses {
 		idPrefix = "resp_"
@@ -370,6 +385,26 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 			return s.delta(d)
 		}
 	}
+	h.bindPromptCache(q, owner)
+	cacheMode := "disabled"
+	if q.CacheAffinity {
+		cacheMode = "scoped-affinity"
+	}
+	if q.NativeCacheForward {
+		cacheMode = "native-parameters-forwarded"
+	}
+	w.Header().Set("X-Oaiprism-Prompt-Cache", cacheMode)
+	if err := h.prepareContext(ctx, q, owner, false, accepted); err != nil {
+		setContextHeaders(w, q)
+		h.fail(w, r, s, withContextReport(q, err))
+		return
+	}
+	setContextHeaders(w, q)
+	for i := range q.Items {
+		if q.Items[i].ID == "" {
+			q.Items[i].ID = "item_" + uuid.NewString()
+		}
+	}
 	result, err := h.engine.Run(ctx, q, accepted, emit)
 	if s != nil {
 		s.join()
@@ -381,12 +416,12 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		err = contract.Finalize(q, result)
 	}
 	if err != nil {
-		h.fail(w, r, s, err)
+		h.fail(w, r, s, withContextReport(q, err))
 		return
 	}
 	usage, err := NormalizeUsage(q, result, h.options.UsagePolicy)
 	if err != nil {
-		h.fail(w, r, s, err)
+		h.fail(w, r, s, withContextReport(q, err))
 		return
 	}
 	for i := range result.Calls {
@@ -419,7 +454,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		_, err = s.finish(result, usage)
 		if err != nil {
 			_, _ = h.store.Delete(context.Background(), id, owner)
-			h.fail(w, r, s, err)
+			h.fail(w, r, s, withContextReport(q, err))
 		}
 		return
 	}

@@ -20,6 +20,8 @@ const MaxItems = 1024
 
 // Options are operator-owned configuration, never request overrides.
 type Options struct {
+	Context          ContextPolicy     `yaml:"context"`
+	Cache            PromptCachePolicy `yaml:"prompt_cache"`
 	Enabled          bool              `yaml:"enabled"`
 	APIKeys          []string          `yaml:"-"`
 	Models           map[string]string `yaml:"-"`
@@ -38,6 +40,9 @@ type Options struct {
 }
 
 func (o Options) Validate() error {
+	if err := o.validateContextCache(); err != nil {
+		return err
+	}
 	if !o.Enabled {
 		return nil
 	}
@@ -104,31 +109,43 @@ type Tool struct {
 	Strict      bool            `json:"strict"`
 }
 type Request struct {
-	Model        string
-	Instructions string
-	Items        []Item
-	Tools        []Tool
-	ToolChoice   string // auto | none | required | a declared tool name
-	Parallel     bool
-	Stream       bool
-	IncludeUsage bool
-	Store        bool
-	PreviousID   string
-	Metadata     map[string]string
-	Effort       string
-	Format       string // text | json_object | json_schema
-	Schema       json.RawMessage
-	SchemaName   string
-	MaxTokens    int
-	Stop         []string
+	PromptCacheKey       string
+	PromptCacheRetention string
+	PromptCacheOptions   map[string]json.RawMessage
+	ScopedCacheKey       string
+	CacheAffinity        bool
+	NativeCacheForward   bool
+	CompactThreshold     int
+	InternalSummary      bool
+	ContextReport        *ContextReport
+	ContextUsage         *Usage
+	Model                string
+	Instructions         string
+	Items                []Item
+	Tools                []Tool
+	ToolChoice           string // auto | none | required | a declared tool name
+	Parallel             bool
+	Stream               bool
+	IncludeUsage         bool
+	Store                bool
+	PreviousID           string
+	Metadata             map[string]string
+	Effort               string
+	Format               string // text | json_object | json_schema
+	Schema               json.RawMessage
+	SchemaName           string
+	MaxTokens            int
+	Stop                 []string
 }
 
 type Usage struct {
-	Input     int
-	Output    int
-	Cached    *int
-	Reasoning *int
-	Source    string // upstream | estimated
+	CacheWrite *int
+	Context    *ContextReport
+	Input      int
+	Output     int
+	Cached     *int
+	Reasoning  *int
+	Source     string // upstream | estimated
 }
 type Result struct {
 	Text       string
@@ -149,6 +166,7 @@ type Engine interface {
 }
 
 type APIError struct {
+	Context    *ContextReport
 	Status     int
 	Code       string
 	Param      string
@@ -191,7 +209,11 @@ func errorBody(api *APIError) map[string]any {
 	if api.Param != "" {
 		param = api.Param
 	}
-	return map[string]any{"error": map[string]any{"message": api.Message, "type": typ, "code": api.Code, "param": param}}
+	body := map[string]any{"error": map[string]any{"message": api.Message, "type": typ, "code": api.Code, "param": param}}
+	if api.Context != nil {
+		body["x_oaiprism_context"] = api.Context
+	}
+	return body
 }
 func writeJSON(w http.ResponseWriter, status int, value any) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

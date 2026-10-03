@@ -23,6 +23,9 @@ func (fixture) Run(ctx context.Context, q *gateway.Request, accepted func() erro
 			return nil, err
 		}
 	}
+	if q.InternalSummary {
+		return &gateway.Result{Text: "Goals: continue task. Facts: preserve constraints and src/main.go. Decisions: unchanged. Open work: next step.", Usage: &gateway.Usage{Input: 40, Output: 8, Source: "upstream"}}, nil
+	}
 	text := "Hello world"
 	hasToolOutput := false
 	for _, item := range q.Items {
@@ -54,7 +57,7 @@ func (fixture) Run(ctx context.Context, q *gateway.Request, accepted func() erro
 	return &gateway.Result{Text: text, Usage: &gateway.Usage{Input: 12, Output: 4, Source: "upstream"}}, nil
 }
 func main() {
-	h, err := gateway.New(gateway.Options{Enabled: true, APIKeys: []string{"fixture-key"}, Models: map[string]string{"test-model": "fixture", "failure": "fixture", "partial-failure": "fixture", "bad-schema": "fixture"}, PromptTools: true, StructuredOutput: true, LocalOutputLimit: true, ResponseStore: true, TenantHeader: "X-Fixture-Tenant", TrustedPeers: []string{"127.0.0.1/32"}, Timeout: 5 * time.Second}, fixture{})
+	h, err := gateway.New(gateway.Options{Context: gateway.ContextPolicy{Enabled: true, WindowTokens: 8192, OutputReserve: 512, SafetyMargin: 128, SummaryTokens: 128, KeepLastTurns: 1, SummaryCache: true}, Cache: gateway.PromptCachePolicy{Affinity: true, NativeModels: []string{"test-model"}}, Enabled: true, APIKeys: []string{"fixture-key"}, Models: map[string]string{"test-model": "fixture", "failure": "fixture", "partial-failure": "fixture", "bad-schema": "fixture"}, PromptTools: true, StructuredOutput: true, LocalOutputLimit: true, ResponseStore: true, TenantHeader: "X-Fixture-Tenant", TrustedPeers: []string{"127.0.0.1/32"}, Timeout: 5 * time.Second}, fixture{})
 	if err != nil {
 		log.Fatal(err)
 	}

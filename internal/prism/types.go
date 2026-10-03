@@ -428,12 +428,13 @@ type PrismEnvelope struct {
 
 // Usage 是 token 用量。
 type Usage struct {
-	Invalid         bool `json:"-"`
-	CachedTokens    *int `json:"-"`
-	ReasoningTokens *int `json:"-"`
-	InputTokens     int  `json:"input_tokens"`
-	OutputTokens    int  `json:"output_tokens"`
-	TotalTokens     int  `json:"total_tokens"`
+	CacheWriteTokens *int `json:"-"`
+	Invalid          bool `json:"-"`
+	CachedTokens     *int `json:"-"`
+	ReasoningTokens  *int `json:"-"`
+	InputTokens      int  `json:"input_tokens"`
+	OutputTokens     int  `json:"output_tokens"`
+	TotalTokens      int  `json:"total_tokens"`
 }
 
 // Sandbox 是一次沙箱申请的结果。

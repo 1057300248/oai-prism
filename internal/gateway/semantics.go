@@ -271,28 +271,13 @@ func LimitText(text string, limit int) (string, bool, error) {
 	}
 	return clipped, true, nil
 }
-func NormalizeUsage(q *Request, result *Result, policy string) (*Usage, error) {
+func normalizeGenerationUsage(q *Request, result *Result, policy string) (*Usage, error) {
 	u := result.Usage
 	if u == nil || u.Source != "upstream" {
 		if policy == "upstream_only" {
 			return nil, errors.New("authoritative upstream usage unavailable")
 		}
-		var text strings.Builder
-		text.WriteString(q.Instructions)
-		text.WriteString(PromptInstructions(q))
-		for _, it := range q.Items {
-			text.WriteString(it.Role)
-			text.WriteString(it.Name)
-			text.WriteString(it.Arguments)
-			text.WriteString(it.Output)
-			for _, c := range it.Content {
-				if c.Type == "input_image" {
-					return nil, errors.New("image token usage cannot be estimated reliably; authoritative upstream usage required")
-				}
-				text.WriteString(c.Text)
-			}
-		}
-		in, err := CountTokens(text.String())
+		in, err := RenderedTokens(q)
 		if err != nil {
 			return nil, err
 		}
@@ -315,6 +300,12 @@ func NormalizeUsage(q *Request, result *Result, policy string) (*Usage, error) {
 	if u.Reasoning != nil && (*u.Reasoning < 0 || *u.Reasoning > u.Output) {
 		return nil, errors.New("invalid reasoning token count")
 	}
+	if u.CacheWrite != nil && (*u.CacheWrite < 0 || *u.CacheWrite > u.Input) {
+		return nil, errors.New("invalid cache write token count")
+	}
+	if u.Cached != nil && u.CacheWrite != nil && *u.Cached+*u.CacheWrite > u.Input {
+		return nil, errors.New("overlapping cache read/write usage")
+	}
 	return u, nil
 }
 func usageJSON(u *Usage, responses bool) any {
@@ -326,8 +317,18 @@ func usageJSON(u *Usage, responses bool) any {
 		input, output, idetail, odetail = "input_tokens", "output_tokens", "input_tokens_details", "output_tokens_details"
 	}
 	m := map[string]any{input: u.Input, output: u.Output, "total_tokens": u.Input + u.Output, "x_oaiprism_source": u.Source}
+	detail := map[string]any{}
 	if u.Cached != nil {
-		m[idetail] = map[string]any{"cached_tokens": *u.Cached}
+		detail["cached_tokens"] = *u.Cached
+	}
+	if u.CacheWrite != nil {
+		detail["cache_write_tokens"] = *u.CacheWrite
+	}
+	if len(detail) > 0 {
+		m[idetail] = detail
+	}
+	if u.Context != nil {
+		m["x_oaiprism_context"] = u.Context
 	}
 	if u.Reasoning != nil {
 		m[odetail] = map[string]any{"reasoning_tokens": *u.Reasoning}

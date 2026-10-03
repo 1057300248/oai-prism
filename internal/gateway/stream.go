@@ -69,6 +69,9 @@ func (s *stream) open(ctx context.Context, cancel context.CancelFunc) error {
 	s.w.Header().Set("Cache-Control", "no-cache, no-store, no-transform")
 	s.w.Header().Set("X-Accel-Buffering", "no")
 	s.w.Header().Add("Trailer", "X-Oaiprism-Usage-Source")
+	for _, name := range []string{"X-Oaiprism-Context-Before", "X-Oaiprism-Context-After", "X-Oaiprism-Summary-Calls", "X-Oaiprism-Summary-Cache-Hits"} {
+		s.w.Header().Add("Trailer", name)
+	}
 	s.opened = true
 	if s.responses {
 		for _, typ := range []string{"response.created", "response.in_progress"} {
@@ -281,6 +284,9 @@ func (s *stream) fail(err error) error {
 	if s.responses {
 		response := responseJSON(s.q, s.id, s.created, "failed", nil, nil)
 		response["error"] = map[string]any{"code": api.Code, "message": api.Message}
+		if api.Context != nil {
+			response["x_oaiprism_context"] = api.Context
+		}
 		if err := s.event("response.failed", map[string]any{"response": response}); err != nil {
 			return err
 		}
@@ -347,7 +353,7 @@ func responseJSON(q *Request, id string, created int64, status string, output []
 		format["schema"] = schema
 		format["strict"] = true
 	}
-	return map[string]any{"id": id, "object": "response", "created_at": created, "completed_at": completed, "status": status, "model": q.Model, "output": output, "usage": usageJSON(usage, true), "error": nil, "incomplete_details": incomplete, "instructions": instructions, "previous_response_id": previous, "store": q.Store, "background": false, "metadata": q.Metadata, "tools": tools, "tool_choice": choice, "parallel_tool_calls": q.Parallel, "text": map[string]any{"format": format}, "reasoning": map[string]any{"effort": effort, "summary": nil}, "temperature": nil, "top_p": nil, "max_output_tokens": maxTokens, "truncation": "disabled"}
+	return map[string]any{"id": id, "object": "response", "x_oaiprism_context": q.ContextReport, "created_at": created, "completed_at": completed, "status": status, "model": q.Model, "output": output, "usage": usageJSON(usage, true), "error": nil, "incomplete_details": incomplete, "instructions": instructions, "previous_response_id": previous, "store": q.Store, "background": false, "metadata": q.Metadata, "tools": tools, "tool_choice": choice, "parallel_tool_calls": q.Parallel, "text": map[string]any{"format": format}, "reasoning": map[string]any{"effort": effort, "summary": nil}, "temperature": nil, "top_p": nil, "max_output_tokens": maxTokens, "truncation": "disabled"}
 }
 func chatJSON(q *Request, id string, created int64, result *Result, usage *Usage) map[string]any {
 	var content any = result.Text
@@ -367,5 +373,5 @@ func chatJSON(q *Request, id string, created int64, result *Result, usage *Usage
 	if result.Incomplete {
 		finish = "length"
 	}
-	return map[string]any{"id": id, "object": "chat.completion", "created": created, "model": q.Model, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish, "logprobs": nil}}, "usage": usageJSON(usage, false)}
+	return map[string]any{"id": id, "object": "chat.completion", "x_oaiprism_context": q.ContextReport, "created": created, "model": q.Model, "choices": []any{map[string]any{"index": 0, "message": message, "finish_reason": finish, "logprobs": nil}}, "usage": usageJSON(usage, false)}
 }

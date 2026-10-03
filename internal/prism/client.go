@@ -801,6 +801,9 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 			}
 			if env.Response.Payload != nil {
 				payload := env.Response.Payload
+				if payload.Usage != nil {
+					out.Usage = payload.Usage
+				}
 				// payload.id 是上游真正的 response 句柄（resp_*），
 				// 多轮延续靠它；start 的 request_id 只是受理号。
 				out.ResponseID = payload.ID

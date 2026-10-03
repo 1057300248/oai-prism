@@ -34,10 +34,10 @@ assert final.status == "completed"
 auto = final.model_dump()["x_oaiprism_context"]
 assert auto["effective_input_tokens"] < auto["original_input_tokens"]
 
-with client.responses.with_raw_response.create(model="test-model", input="cache test", store=False,
-        extra_body={"prompt_cache_key": "sdk-key", "prompt_cache_options": {"mode": "implicit", "ttl": "30m"}}) as raw_response:
-    assert raw_response.headers["x-oaiprism-prompt-cache"] == "native-parameters-forwarded"
-    assert raw_response.parse().output_text == "Hello world"
+raw_response = client.responses.with_raw_response.create(model="test-model", input="cache test", store=False,
+        extra_body={"prompt_cache_key": "sdk-key", "prompt_cache_options": {"mode": "implicit", "ttl": "30m"}})
+assert raw_response.headers["x-oaiprism-prompt-cache"] == "native-parameters-forwarded"
+assert raw_response.parse().output_text == "Hello world"
 
 try:
     client.responses.create(model="test-model", input="x", store=False,
