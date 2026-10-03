@@ -211,7 +211,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if tail == "input_items" {
-			writeJSON(w, 200, map[string]any{"object": "list", "data": snapshot.Items, "has_more": false})
+			page, err := inputItemsPage(snapshot, r.URL.Query())
+			if err != nil {
+				h.fail(w, r, nil, err)
+				return
+			}
+			writeJSON(w, 200, page)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
@@ -297,6 +302,11 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 			return
 		}
 		q.Items = append(snapshot.Items, q.Items...)
+	}
+	for i := range q.Items {
+		if q.Items[i].ID == "" {
+			q.Items[i].ID = "item_" + uuid.NewString()
+		}
 	}
 	raw, _ := json.Marshal(q.Items)
 	if len(raw) > MaxHistory || len(q.Items) > MaxItems {
@@ -396,7 +406,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		if err != nil {
 			return err
 		}
-		return h.store.Put(ctx, id, owner, Snapshot{Response: raw, Items: history})
+		return h.store.Put(ctx, id, owner, Snapshot{Response: raw, Items: history, InputItems: append([]Item(nil), q.Items...)})
 	}
 	w.Header().Set("X-Oaiprism-Usage-Source", usage.Source)
 	if s != nil {

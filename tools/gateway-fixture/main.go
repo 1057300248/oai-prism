@@ -3,32 +3,63 @@
 package main
 
 import (
- "context"
- "errors"
- "log"
- "net/http"
- "time"
+	"context"
+	"errors"
+	"log"
+	"net/http"
+	"time"
 
- "github.com/oai-prism/oaiprism/internal/gateway"
+	"github.com/oai-prism/oaiprism/internal/gateway"
 )
 
 type fixture struct{}
-func(fixture)Run(ctx context.Context,q *gateway.Request,accepted func()error,emit func(gateway.Delta)error)(*gateway.Result,error){
- if q.Model=="failure"{return nil,&gateway.APIError{Status:429,Code:"rate_limit_exceeded",Message:"Fixture rate limit.",RetryAfter:time.Second}}
- if accepted!=nil{if err:=accepted();err!=nil{return nil,err}}
- text:="Hello world"
- hasToolOutput:=false;for _,item:=range q.Items{if item.Type=="function_call_output"{hasToolOutput=true}}
- if q.Format!="text"{text=`{"n":3}`}
- if len(q.Tools)>0{if hasToolOutput{text=`{"text":"The weather is sunny.","tool_calls":[]}`}else{text=`{"text":"","tool_calls":[{"name":"weather","arguments":{"city":"London"}}]}`}}
- if q.Model=="bad-schema"{text=`{"n":"wrong"}`}
- if emit!=nil{if err:=emit(gateway.Delta{Text:text});err!=nil{return nil,err}}
- if q.Model=="partial-failure"{return nil,errors.New("fixture upstream failure")}
- return &gateway.Result{Text:text,Usage:&gateway.Usage{Input:12,Output:4,Source:"upstream"}},nil
+
+func (fixture) Run(ctx context.Context, q *gateway.Request, accepted func() error, emit func(gateway.Delta) error) (*gateway.Result, error) {
+	if q.Model == "failure" {
+		return nil, &gateway.APIError{Status: 429, Code: "rate_limit_exceeded", Message: "Fixture rate limit.", RetryAfter: time.Second}
+	}
+	if accepted != nil {
+		if err := accepted(); err != nil {
+			return nil, err
+		}
+	}
+	text := "Hello world"
+	hasToolOutput := false
+	for _, item := range q.Items {
+		if item.Type == "function_call_output" {
+			hasToolOutput = true
+		}
+	}
+	if q.Format != "text" {
+		text = `{"n":3}`
+	}
+	if len(q.Tools) > 0 {
+		if hasToolOutput {
+			text = `{"text":"The weather is sunny.","tool_calls":[]}`
+		} else {
+			text = `{"text":"","tool_calls":[{"name":"weather","arguments":{"city":"London"}}]}`
+		}
+	}
+	if q.Model == "bad-schema" {
+		text = `{"n":"wrong"}`
+	}
+	if emit != nil {
+		if err := emit(gateway.Delta{Text: text}); err != nil {
+			return nil, err
+		}
+	}
+	if q.Model == "partial-failure" {
+		return nil, errors.New("fixture upstream failure")
+	}
+	return &gateway.Result{Text: text, Usage: &gateway.Usage{Input: 12, Output: 4, Source: "upstream"}}, nil
 }
-func main(){
- h,err:=gateway.New(gateway.Options{Enabled:true,APIKeys:[]string{"fixture-key"},Models:map[string]string{"test-model":"fixture","failure":"fixture","partial-failure":"fixture","bad-schema":"fixture"},PromptTools:true,StructuredOutput:true,LocalOutputLimit:true,ResponseStore:true,TenantHeader:"X-Fixture-Tenant",TrustedPeers:[]string{"127.0.0.1/32"},Timeout:5*time.Second},fixture{})
- if err!=nil{log.Fatal(err)};defer h.Close()
- server:=&http.Server{Addr:"127.0.0.1:18787",Handler:h,ReadHeaderTimeout:5*time.Second,ReadTimeout:10*time.Second,IdleTimeout:30*time.Second}
- log.Print("LOCAL TEST FIXTURE ONLY: 127.0.0.1:18787")
- log.Fatal(server.ListenAndServe())
+func main() {
+	h, err := gateway.New(gateway.Options{Enabled: true, APIKeys: []string{"fixture-key"}, Models: map[string]string{"test-model": "fixture", "failure": "fixture", "partial-failure": "fixture", "bad-schema": "fixture"}, PromptTools: true, StructuredOutput: true, LocalOutputLimit: true, ResponseStore: true, TenantHeader: "X-Fixture-Tenant", TrustedPeers: []string{"127.0.0.1/32"}, Timeout: 5 * time.Second}, fixture{})
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer h.Close()
+	server := &http.Server{Addr: "127.0.0.1:18787", Handler: h, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second}
+	log.Print("LOCAL TEST FIXTURE ONLY: 127.0.0.1:18787")
+	log.Fatal(server.ListenAndServe())
 }

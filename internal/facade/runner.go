@@ -252,6 +252,12 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 
 		res, err := r.runLeased(ctx, lease.Account, req, emit)
 		lease.Release()
+		if err == nil && res == nil {
+			err = errors.New("upstream returned no result")
+		}
+		if err == nil && res.Usage != nil && res.Usage.Invalid {
+			err = errors.New("invalid upstream usage")
+		}
 
 		if err == nil {
 			r.app.FacadeRuns.Inc(api, req.Model, "ok")
