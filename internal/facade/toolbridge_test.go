@@ -498,3 +498,37 @@ func TestFoldInputHistory_FiltersStaticInstructions(t *testing.T) {
 		t.Fatalf("当轮用户提问不匹配: %+v", got[1])
 	}
 }
+
+// TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution 验证真实 Codex CLI 多轮工具调用的完整输入翻译与折叠
+func TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution(t *testing.T) {
+	rawJSON := `[
+		{"type":"message","role":"developer","content":"You are Codex..."},
+		{"type":"message","role":"user","content":"用 HTML 实现一个 SVG，绘制鹈鹕骑自行车的场景，输出到本地文件"},
+		{"type":"custom_tool_call","name":"exec_command","call_id":"call_123","input":"const out = await tools.exec_command({ cmd: \"python -c 'Path(\\\"pelican-bicycle.html\\\").write_text(...)'\" });"},
+		{"type":"custom_tool_call_output","call_id":"call_123","output":"(no output)"},
+		{"type":"message","role":"assistant","content":"The command exited successfully with no output. What would you like to do next?"},
+		{"type":"message","role":"user","content":"你文件输出的路径在哪里？"}
+	]`
+
+	items := bridgeInputItems([]byte(rawJSON), "default-sys")
+	if len(items) == 0 {
+		t.Fatalf("bridgeInputItems 解析失败")
+	}
+
+	folded := foldInputHistory(items)
+	if len(folded) != 3 {
+		t.Fatalf("期望折叠后保留 3 条 (首条 system + 当轮提问 + tail)，实际得到 %d 条", len(folded))
+	}
+
+	sysText := folded[0].Content[0].Text
+	if !strings.Contains(sysText, "pelican-bicycle.html") {
+		t.Fatalf("历史折叠应完整保留上一轮工具调用的文件名 pelican-bicycle.html:\n%s", sysText)
+	}
+	if !strings.Contains(sysText, "(no output)") {
+		t.Fatalf("历史折叠应完整保留上一轮工具调用结果 (no output):\n%s", sysText)
+	}
+	if folded[1].Role != "user" || folded[1].Content[0].Text != "你文件输出的路径在哪里？" {
+		t.Fatalf("第二轮用户提问不匹配: %+v", folded[1])
+	}
+}
+

@@ -130,31 +130,14 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		API:          "responses",
 		ExtraHeaders: extractSentinelToken(r),
 	}
-	// Responses API 原生就有 previous_response_id，客户端显式传入时透传。
+	// 继承客户端传入的延续字段（用于增量单条消息客户端）
 	runReq.PreviousResponseID = req.PreviousResponseID
 	runReq.ConversationID = conversationIDFrom(r, rawFields)
 
-	// 会话状态持久化继承：从 sessionChain 恢复上轮会话句柄与沙箱会话指针。
-	// 同一 Project 内部复用同一个 conversationId（cdx1_*）与 PreviousResponseID（resp_*），
-	// 并注入 codex_listen_snapshot，使上游模型在同一个 Project 和同一个沙箱会话内继续执行，
-	// 彻底杜绝每轮新建会话记录与跨沙箱失忆！
-	if chainProj, chainConv, chainPrev, _, chainSnap := sessionChainGet(stickyKey); chainProj != "" || chainConv != "" {
-		if runReq.ProjectID == "" && chainProj != "" {
+	// 会话状态持久化继承：从 sessionChain 恢复上轮项目句柄
+	if chainProj, _, _, _, _ := sessionChainGet(stickyKey); chainProj != "" {
+		if runReq.ProjectID == "" {
 			runReq.ProjectID = chainProj
-		}
-		if runReq.ConversationID == "" && chainConv != "" {
-			runReq.ConversationID = chainConv
-		}
-		if runReq.PreviousResponseID == "" && chainPrev != "" {
-			runReq.PreviousResponseID = chainPrev
-		}
-		if len(chainSnap) > 0 {
-			if runReq.Metadata == nil {
-				runReq.Metadata = make(map[string]any)
-			}
-			if _, ok := runReq.Metadata["codex_listen_snapshot"]; !ok {
-				runReq.Metadata["codex_listen_snapshot"] = string(chainSnap)
-			}
 		}
 	}
 
@@ -164,14 +147,22 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 	if !hasClientHistory {
 		if hist := sessionChainHistory(runReq.StickyKey); len(hist) > 0 {
 			runReq.Input = injectChainHistory(runReq.Input, hist)
-			// 带 previous_response_id 时上游把 input 当增量（服务端
-			// 不代管历史 → 上下文丢失），自己拼了历史就不能再带它。
 			runReq.PreviousResponseID = ""
 		}
+	}
+
+	// 关键：在桥模式（Codex CLI）下，全量多轮历史已经由 foldInputHistory 折叠拼入 input 首条 System 消息中。
+	// 实测证明：上游若同时收到 previousResponseId，会判定为"增量调用"而直接丢弃/忽略 System 中的折叠历史，
+	// 导致模型在多轮追问时发生灾难性失忆（"本次对话中我还没有创建或输出文件"）。
+	// 因此在桥模式下，发给上游的 PreviousResponseID 与 ConversationID 必须置空，确保上游完整消化 System 中的历史。
+	if bridge {
+		runReq.PreviousResponseID = ""
+		runReq.ConversationID = ""
 	}
 	runReq.Extra = passthroughFields(rawFields, responsesKnownFields)
 
 	isAux := !bridge && len(rawFields["input"]) < 3000 && (toolsStr == "" || toolsStr == "null" || toolsStr == "[]")
+	runReq.IsAux = isAux
 	if isAux {
 		// 伴生轻量请求（标题/摘要生成）：优先复用活跃项目，绝不新建独立项目，亦不污染会话链
 		if runReq.ProjectID == "" {

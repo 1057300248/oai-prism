@@ -69,6 +69,9 @@ type RunRequest struct {
 	// 同步模式会把它收紧到 facade.sync_timeout —— 让一个 HTTP 请求
 	// 挂 15 分钟才返回是不可接受的，客户端早就超时了。
 	Deadline time.Duration
+
+	// IsAux 标识是否为伴生轻量请求（标题/摘要生成），伴生请求优先复用活跃项目，绝不新建独立项目。
+	IsAux bool
 }
 
 // Delta 是一次增量。
@@ -959,10 +962,19 @@ func (r *Runner) ActiveProject(accountID string) (string, bool) {
 func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req *RunRequest) (string, error) {
 	f := &r.cfg.Facade
 
+	// 伴生轻量请求：优先复用活跃项目，若无活跃项目则降级无项目继续，绝不独立建项目。
+	if req.IsAux {
+		if activeID, ok := r.projects.GetActive(acct.ID, time.Now()); ok && activeID != "" {
+			return activeID, nil
+		}
+		return "", nil
+	}
+
 	bucketKey := req.StickyKey
 	if !f.ReuseProject {
 		return r.createProject(ctx, acct)
 	}
+
 	if bucketKey == "" {
 		// 没有会话标识时用轮转分桶，而不是"所有人共用一个项目"——
 		// 共用一个项目会把并发请求在上游串行化。
