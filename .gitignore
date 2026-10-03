@@ -42,7 +42,6 @@ coverage.out
 
 # 第三方参考资料与逆向分析产物（含 JS bundle，不入库）
 .ref/
-oaiprism.exe~
 
 # Python 缓存
 tools/__pycache__/
