@@ -1,0 +1,51 @@
+name: Codex Client Diagnostics
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+    paths: [.github/workflows/codex-debug.yml]
+permissions:
+  contents: read
+jobs:
+  diagnose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Reconstruct candidate
+        run: |
+          set -euo pipefail
+          python tools/codex_integrate.py
+          gofmt -w internal/catalog internal/gateway internal/facade/gateway_adapter.go internal/facade/catalog_acquire.go internal/facade/runner.go tools/codex-fixture
+          python tools/codex_followup.py
+          gofmt -w internal/gateway internal/facade/gateway_adapter.go
+          mkdir -p "$RUNNER_TEMP/codex-tools" codex-debug
+          npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
+          BIN=$(find "$RUNNER_TEMP/codex-tools/node_modules" -type f -path '*/codex/codex' | head -1)
+          test -n "$BIN"
+          tar -C "$(dirname "$BIN")" -czf codex-debug/pinned-cli.tar.gz codex
+          go build -o "$RUNNER_TEMP/codex-fixture" ./tools/codex-fixture
+      - name: Actual client diagnostics
+        run: |
+          export CODEX_CLI="$RUNNER_TEMP/codex-tools/node_modules/.bin/codex"
+          export CODEX_FIXTURE_BIN="$RUNNER_TEMP/codex-fixture"
+          export CODEX_EVIDENCE_DIR="$GITHUB_WORKSPACE/codex-debug/evidence"
+          python tools/codex_contract_test.py > codex-debug/client-test.log 2>&1
+      - name: Safe fixture error summary
+        if: always()
+        run: |
+          tail -60 codex-debug/client-test.log || true
+          grep 'FIXTURE engine error' codex-debug/evidence/fixture.log || true
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: codex-client-diagnostics
+          path: codex-debug/
+          retention-days: 1
