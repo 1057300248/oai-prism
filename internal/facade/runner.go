@@ -768,12 +768,14 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 	var tokenErr error
 	tokenStage := ""
 	var resourceToken *prism.ResourceToken
-	for attempt := 1; attempt <= 2; attempt++ {
+	// 3 次尝试 + 递增退避（1.5s/3s）：风控风暴期单次重试不够
+	//（2026-10-03 实测连续两次 403 后才恢复）。
+	for attempt := 1; attempt <= 3; attempt++ {
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
 				return false
-			case <-time.After(1500 * time.Millisecond):
+			case <-time.After(time.Duration(attempt-1) * 1500 * time.Millisecond):
 			}
 			r.log.Info("重试资源令牌签发/交付", "account", acct.ID, "project", projectID, "attempt", attempt)
 		}
@@ -987,13 +989,20 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 
 // isAccountLevel 判断错误是否值得换账号重试。
 //
-// 401/403 是账号问题；429 是配额问题；5xx 也值得换号。
+// 401 是账号问题；429 是配额问题；5xx 也值得换号。
 // 4xx 协议错误不重试 —— 换号也一样错。
+// 例外：Sentinel 风控 403（"Request verification failed"）不是账号
+// 问题 —— 同账号重试即恢复（IsAuthError 已把它排除出认证失效），
+// 但它是**瞬时**故障而非协议错误，同号重试值得（单号池下"换号"
+// 就是同号重试；风控窗口内 runLoop 的 attempt 上限天然限流）。
 func isAccountLevel(err error) bool {
 	if err == nil {
 		return false
 	}
 	if creds.IsAuthError(err) || creds.IsRateLimited(err) {
+		return true
+	}
+	if isSentinelThrottle(err) {
 		return true
 	}
 	var ae *creds.APIError

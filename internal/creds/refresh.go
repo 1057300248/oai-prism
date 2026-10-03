@@ -332,7 +332,17 @@ func IsAuthError(err error) bool {
 		return false
 	}
 	switch ae.Status {
-	case http.StatusUnauthorized, http.StatusForbidden:
+	case http.StatusUnauthorized:
+		return true
+	case http.StatusForbidden:
+		// Sentinel 风控校验失败（"Request verification failed.
+		// Please try again."）不是凭据失效 —— 账号本身是好的，
+		// 同账号重试即恢复（2026-10-03 Codex 风暴实测：连续 403
+		// 被当成认证失效 → 60s 冷却 → 单账号池全灭 60s，而沙箱
+		// 重试 3s 后就绪）。它应按"请求级可重试故障"处理。
+		if strings.Contains(ae.Body, "Request verification failed") {
+			return false
+		}
 		return true
 	}
 	return false
