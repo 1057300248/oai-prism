@@ -92,6 +92,22 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 			input = append([]prism.InputItem{prism.NewSystemItem(h.cfg.Facade.DefaultSystemPrompt)}, input...)
 		}
 	}
+	// 历史注入判据：必须在 foldInputHistory 之前检查客户端是否已经携带了多轮历史。
+	// foldInputHistory 会把中间的 assistant 和工具调用折叠进首条 system，
+	// 若在此之后检查，input 里的 assistant 条目已经被移出，会导致 hasAssistant 恒为 false，
+	// 进而误把 Codex 等完整多轮客户端当成"单条消息客户端"二次注入 sessionChain。
+	hasClientHistory := false
+	for _, it := range input {
+		r := strings.ToLower(strings.TrimSpace(it.Role))
+		if r == "assistant" || r == "tool" || r == "function" {
+			hasClientHistory = true
+			break
+		}
+	}
+
+	// 提取稳定会话标识（必须在 foldInputHistory 之前计算，避免折叠历史导致哈希漂移！）
+	stickyKey := responsesConversationKey(r, rawFields, input)
+
 	// 历史折叠：上游只认「首条 system + 最后一条消息」，中间条目全被
 	// 丢弃（见 foldInputHistory 注释）。Codex 每轮回传完整 input，
 	// 不折叠就是跨轮失忆 —— 这是 chat 工作台有记忆而 Codex 没有的
@@ -108,28 +124,44 @@ func (h *Handler) handleResponses(w http.ResponseWriter, r *http.Request) {
 		UserID:       req.User,
 		Input:        input,
 		Metadata:     mergeMetadata(clientMetadata(rawFields), metadataWith("tools", toolsMetadata(req.Tools))),
-		StickyKey:    responsesConversationKey(r, rawFields, input),
+		StickyKey:    stickyKey,
 		AccountID:    accountID,
 		ProjectID:    projectID,
 		API:          "responses",
 		ExtraHeaders: extractSentinelToken(r),
 	}
 	// Responses API 原生就有 previous_response_id，客户端显式传入时透传。
-	// 注意：真实 Web 前端从不发这两个字段（10-01 抓包 92 条 start
-	// 全部 cid=N prev=N），多轮上下文靠"全量 input 回传"。
 	runReq.PreviousResponseID = req.PreviousResponseID
 	runReq.ConversationID = conversationIDFrom(r, rawFields)
-	// 历史注入：input 里没有 assistant 条目时视为"单条消息客户端"，
-	// 拼入链缓存的历史（上游不代管对话历史，见 session_chain.go 头注释）。
-	// Codex CLI / 标准 Responses 客户端会回传完整 input，天然跳过。
-	hasAssistant := false
-	for _, it := range runReq.Input {
-		if it.Role == "assistant" {
-			hasAssistant = true
-			break
+
+	// 会话状态持久化继承：从 sessionChain 恢复上轮会话句柄与沙箱会话指针。
+	// 同一 Project 内部复用同一个 conversationId（cdx1_*）与 PreviousResponseID（resp_*），
+	// 并注入 codex_listen_snapshot，使上游模型在同一个 Project 和同一个沙箱会话内继续执行，
+	// 彻底杜绝每轮新建会话记录与跨沙箱失忆！
+	if chainProj, chainConv, chainPrev, _, chainSnap := sessionChainGet(stickyKey); chainProj != "" || chainConv != "" {
+		if runReq.ProjectID == "" && chainProj != "" {
+			runReq.ProjectID = chainProj
+		}
+		if runReq.ConversationID == "" && chainConv != "" {
+			runReq.ConversationID = chainConv
+		}
+		if runReq.PreviousResponseID == "" && chainPrev != "" {
+			runReq.PreviousResponseID = chainPrev
+		}
+		if len(chainSnap) > 0 {
+			if runReq.Metadata == nil {
+				runReq.Metadata = make(map[string]any)
+			}
+			if _, ok := runReq.Metadata["codex_listen_snapshot"]; !ok {
+				runReq.Metadata["codex_listen_snapshot"] = string(chainSnap)
+			}
 		}
 	}
-	if !hasAssistant {
+
+	// 历史注入：仅当客户端本身没有携带往轮历史（单条消息客户端）时，
+	// 才拼入链缓存的历史（上游不代管对话历史，见 session_chain.go 头注释）。
+	// Codex CLI / 标准 Responses 客户端会回传完整 input，命中 hasClientHistory 天然跳过。
+	if !hasClientHistory {
 		if hist := sessionChainHistory(runReq.StickyKey); len(hist) > 0 {
 			runReq.Input = injectChainHistory(runReq.Input, hist)
 			// 带 previous_response_id 时上游把 input 当增量（服务端
@@ -166,6 +198,23 @@ var responsesKnownFields = map[string]struct{}{
 func responsesConversationKey(r *http.Request, body map[string]json.RawMessage, items []prism.InputItem) string {
 	if v := strings.TrimSpace(r.Header.Get(HeaderSession)); v != "" {
 		return "h:" + v
+	}
+	// 优先直接解析 Codex CLI 专有的 client_metadata 与 prompt_cache_key
+	if raw, ok := body["client_metadata"]; ok && len(raw) > 0 {
+		var cm map[string]any
+		if err := json.Unmarshal(raw, &cm); err == nil {
+			for _, k := range []string{"session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"} {
+				if v, ok := cm[k].(string); ok && strings.TrimSpace(v) != "" {
+					return "cm:" + strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+	if raw, ok := body["prompt_cache_key"]; ok && len(raw) > 0 {
+		var pck string
+		if err := json.Unmarshal(raw, &pck); err == nil && strings.TrimSpace(pck) != "" {
+			return "pck:" + strings.TrimSpace(pck)
+		}
 	}
 	conv := make([]ChatMessage, 0, len(items))
 	for _, it := range items {
@@ -248,7 +297,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		}
 		res, runErr := h.runner.Run(r.Context(), runReq, emit)
 		bindLogAccount(r, res)
-		sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+		sessionChainRecord(runReq.StickyKey, res, runReq.Model)
 		if res != nil && res.Text != "" {
 			sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
 		}
@@ -332,6 +381,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 				Type:       "response.completed",
 				ResponseID: id, Model: publicModel, CreatedAt: created,
 				OutputJSON: "[" + item + "]",
+				Usage:      usage,
 			})
 			_ = sw.WriteRaw(done)
 			return
@@ -368,7 +418,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 	res, runErr := h.runner.Run(r.Context(), runReq, emit)
 	bindLogAccount(r, res)
 	// 非桥流式路径同样要回写会话链，否则下一轮 fill 拿不到句柄。
-	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	sessionChainRecord(runReq.StickyKey, res, runReq.Model)
 	if res != nil && res.Text != "" {
 		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
 	}
@@ -413,7 +463,7 @@ func emitTextResponseEvents(sw *sse.Writer, buf *[]byte, id, publicModel string,
 func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *RunRequest, id string, created int64, publicModel string, bridge bool, execToolName, execKind string) {
 	res, err := h.runner.Run(r.Context(), runReq, nil)
 	bindLogAccount(r, res)
-	sessionChainPut(runReq.StickyKey, chainConv(res), resReqID(res), resAccount(res), runReq.Model)
+	sessionChainRecord(runReq.StickyKey, res, runReq.Model)
 	if err == nil && res != nil && res.Text != "" {
 		sessionChainAppend(runReq.StickyKey, lastUserText(runReq.Input), res.Text)
 	}
@@ -460,11 +510,15 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 					"name": execToolName, "input": js,
 				}
 			}
-			writeJSON(w, http.StatusOK, map[string]any{
+			respMap := map[string]any{
 				"id": id, "object": "response", "created_at": created,
 				"status": "completed", "model": publicModel,
 				"output": []any{out},
-			})
+			}
+			if usage != nil {
+				respMap["usage"] = usage
+			}
+			writeJSON(w, http.StatusOK, respMap)
 			return
 		}
 		text = stripExecFence(text)

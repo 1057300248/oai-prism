@@ -464,3 +464,37 @@ func TestFoldInputHistory(t *testing.T) {
 		t.Fatalf("两条输入不应折叠")
 	}
 }
+
+// TestFoldInputHistory_FiltersStaticInstructions 验证客户端注入的 AGENTS.md 静态指令
+// 会被自动剔除，不作为用户提问污染 [Previous Conversation History]。
+func TestFoldInputHistory_FiltersStaticInstructions(t *testing.T) {
+	mk := func(role, text string) prism.InputItem {
+		it := prism.NewUserItem(text)
+		it.Role = role
+		return it
+	}
+	items := []prism.InputItem{
+		prism.NewSystemItem("bridge-prompt"),
+		mk("user", "# AGENTS.md instructions for C:\\Users\\test\n\n<INSTRUCTIONS>\nDO NOT send optional context\n</INSTRUCTIONS>"),
+		mk("user", "请帮我写一个网页"),
+		mk("assistant", "```codex-exec\nconst out = await tools.exec_command({ cmd: \"echo done\" });\n```"),
+		mk("user", "[CLIENT RESULT]\nProcess exited with code 0\n[/CLIENT RESULT]"),
+		mk("assistant", "已创建完成。"),
+		mk("user", "文件保存在哪里？"),
+		prism.NewSystemItem("tail-reminder"),
+	}
+	got := foldInputHistory(items)
+	if len(got) != 3 {
+		t.Fatalf("期望 3 条（system + 本轮 user + tail），得到 %d", len(got))
+	}
+	sys := got[0].Content[0].Text
+	if strings.Contains(sys, "# AGENTS.md") {
+		t.Fatalf("静态 AGENTS.md 不应混入历史: %s", sys)
+	}
+	if !strings.Contains(sys, "请帮我写一个网页") || !strings.Contains(sys, "echo done") {
+		t.Fatalf("真实历史丢失: %s", sys)
+	}
+	if got[1].Content[0].Text != "文件保存在哪里？" {
+		t.Fatalf("当轮用户提问不匹配: %+v", got[1])
+	}
+}

@@ -15,11 +15,21 @@ type CompressionConfig struct {
 	MaxCharsThreshold int
 }
 
-// DefaultCompressionConfig 默认上下文压缩配置。
+// DefaultCompressionConfig 默认上下文压缩配置（短会话兜底）。
 var DefaultCompressionConfig = CompressionConfig{
 	MaxHistoryTurns:   6,
 	KeepRecentTurns:   2,
 	MaxCharsThreshold: 16000,
+}
+
+// DefaultContextWindowConfig 适用于现代大上下文窗口（如 Codex 256K / 258,400 tokens）的压缩配置。
+// 注意：单次请求输入大小与连续多轮输入的上下文窗口是两个不同维度的概念。
+// 压缩只在多轮累积真正达到/逼近上下文窗口容量（如 ~200k tokens，约 600,000 字符，或超过 40 轮）时才触发；
+// 未达到窗口阈值时完整保留全部历史，不进行过度截断。
+var DefaultContextWindowConfig = CompressionConfig{
+	MaxHistoryTurns:   40,
+	KeepRecentTurns:   10,
+	MaxCharsThreshold: 600000,
 }
 
 // CompressChatMessages 对超长的 messages 列表执行确定性滑动窗口与摘要压缩。

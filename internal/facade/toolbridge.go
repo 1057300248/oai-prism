@@ -105,7 +105,7 @@ func bridgePrompt() string {
 		"<local_tool_bridge>",
 		`You are the reasoning engine for a LOCAL coding agent (Codex CLI). The client executes ALL tools locally on the user's machine.`,
 		``,
-		`CRITICAL: You have NO terminal, NO file system, and NO sandbox tools in this conversation. Any built-in shell/codex/terminal tools in your runtime operate in a REMOTE SANDBOX the user cannot see. NEVER use them. NEVER claim you created, ran, or modified anything unless the client's tool result (marked [CLIENT RESULT]) confirms it.`,
+		`CRITICAL: You have NO terminal, NO file system, and NO sandbox tools in this conversation. Any built-in shell/codex/terminal tools in your runtime operate in a REMOTE SANDBOX the user cannot see. NEVER use them. When a previous tool call was executed and succeeded in [CLIENT RESULT] (such as exit code 0 or "exited successfully with no output"), you MUST recognize that the command ran and its file changes took effect locally on the user's client machine.`,
 		``,
 		`To run any command or create/edit/delete files on the user's machine, output EXACTLY ONE fenced block:`,
 		"```codex-exec",
@@ -132,13 +132,25 @@ func bridgePrompt() string {
 		`- List directory: Windows "Get-ChildItem" ; bash "ls -la"`,
 		`- NEVER use bash-only syntax (printf/cat redirection/heredoc) when the client is Windows — it fails silently and wastes a turn. If the OS cannot be determined, prefer the PowerShell recipe.`,
 		``,
+		`LOCAL HISTORY AWARENESS: Any [Previous Conversation History] in this prompt contains the genuine sequence of past user requests, commands you executed via exec_command on the client, and their results in this conversation. When the user asks what command you just ran, what file was written, or where an output was saved, you MUST refer to the commands and results in [Previous Conversation History] (e.g. scripts writing to relative paths write directly to the user's client working directory). Do NOT claim you cannot see previous actions when they are recorded in the history.`,
+		``,
 		`Output rules: outside the block write at most one short sentence of prose. If no tool is needed, reply normally with no block. Always emit the FULL file content in the command — never abbreviate.`,
 		`Do NOT emit a block for greetings, questions, or small talk, and do NOT run environment checks or "test" commands (like true/echo/ls) to probe the client — emit a block ONLY when the task itself requires an operation on the user's machine.`,
 		"</local_tool_bridge>",
 	}, "\n")
 }
 
-// foldInputHistory 把 input 的中间历史折叠进首条 system。
+// isStaticInstruction 判断文本是否为客户端静态环境规则（如 AGENTS.md / skills 指令）。
+// 这类文本由客户端自动注入且体积巨大（常达 8KB~20KB），若混入 [Previous Conversation History]
+// 会被上游误当成用户的提问，严重污染真实对话链路并挤占上下文。
+func isStaticInstruction(text string) bool {
+	trimmed := strings.TrimSpace(text)
+	return strings.HasPrefix(trimmed, "# AGENTS.md") ||
+		strings.HasPrefix(trimmed, "<INSTRUCTIONS>") ||
+		strings.HasPrefix(trimmed, "<skills_instructions>")
+}
+
+// foldInputHistory 把 input 的中间历史折叠进首条 system，并实施上下文窗口管理。
 //
 // 上游后端只提取「首条 system + 最后一条 user」，中间的 input 条目
 // 全部丢弃（translate.go 头注释记录的同一缺陷）。Codex CLI 每轮
@@ -146,11 +158,11 @@ func bridgePrompt() string {
 // 工具结果），这些条目排在中间 —— 跨轮时全部被上游丢弃，表现为
 // Codex 失忆："不记得我刚刚让你干什么"（2026-10-03 用户实测）。
 //
-// 折叠策略与 chat.go 的 translate 一致：首条 system 与最后一条
-// 消息（本轮 user 或工具结果）保留，其余按 Speaker: text 折叠成
-// [Previous Conversation History] 文本追加进 system。尾部 system
-// （bridgeTailReminder）不是消息，跳过后保留在原位 —— 末尾指令
-// 服从度最高的性质不能丢。
+// 上下文窗口与压缩（256K 窗口对齐）：
+// 单次请求输入（如单输入 16K）与连续多轮输入的上下文窗口（256K / 258,400 tokens）
+// 是两个不同维度的概念。Codex 具备 256K 级别上下文窗口，在日常对话中完整保留全部历史
+// 细节（包括写入命令、相对路径、执行结果等）。只有在连续多轮累积真正逼近/达到
+// 256K 窗口上限（由 DefaultContextWindowConfig 定义）时，才触发滑动窗口压缩。
 func foldInputHistory(items []prism.InputItem) []prism.InputItem {
 	if len(items) <= 2 {
 		return items
@@ -164,7 +176,12 @@ func foldInputHistory(items []prism.InputItem) []prism.InputItem {
 		return items
 	}
 
-	var sb strings.Builder
+	type historyTurn struct {
+		speaker string
+		text    string
+	}
+	var turns []historyTurn
+
 	for i := 1; i < lastIdx; i++ {
 		it := items[i]
 		if strings.EqualFold(it.Role, "system") {
@@ -181,19 +198,35 @@ func foldInputHistory(items []prism.InputItem) []prism.InputItem {
 		for _, c := range it.Content {
 			txt.WriteString(c.Text)
 		}
-		if strings.TrimSpace(txt.String()) == "" {
+		contentStr := strings.TrimSpace(txt.String())
+		if contentStr == "" {
 			continue
 		}
-		if sb.Len() > 0 {
-			sb.WriteString("\n")
+
+		// 过滤客户端静态注入的 AGENTS.md 等规则，不作为用户对话污染历史
+		if speaker == "User" && isStaticInstruction(contentStr) {
+			continue
 		}
-		sb.WriteString(speaker)
-		sb.WriteString(": ")
-		sb.WriteString(txt.String())
+
+		turns = append(turns, historyTurn{speaker: speaker, text: contentStr})
 	}
-	if sb.Len() == 0 {
+
+	if len(turns) == 0 {
 		return items
 	}
+
+	var sb strings.Builder
+	// 完整保留 Codex 传入的往轮历史，不擅自截断或伪压缩；
+	// 压缩操作完全由本地 Codex CLI 依据上下文窗口用量自行触发 compress。
+	for i, t := range turns {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		sb.WriteString(t.speaker)
+		sb.WriteString(": ")
+		sb.WriteString(t.text)
+	}
+
 	history := "\n\n[Previous Conversation History]\n" + sb.String()
 
 	if strings.EqualFold(items[0].Role, "system") && len(items[0].Content) > 0 {
@@ -503,7 +536,8 @@ func bridgeTailReminder() string {
 		`The ONLY way your actions reach the user's machine is a ` + "```codex-exec" + ` ` + "```" + ` block (executed locally by the client).`,
 		`If the task requires running anything or creating/editing/deleting files, you MUST emit that block in THIS reply — with the FULL command and FULL file content. Do not describe, summarize, or claim completion without it.`,
 		`SHELL SYNTAX: exec_command runs in the client's native PTY — PowerShell on Windows, bash elsewhere. NEVER emit bash-only syntax (` + "`cat >`" + `, ` + "`<<'EOF'`" + ` heredocs, ` + "`printf >`" + `) unless you know the client is macOS/Linux: it fails instantly with a parser error and burns a round trip. For writing files on Windows use the single-quoted here-string recipe (` + "`$c = @'...'@; Set-Content -LiteralPath <path> -Value $c -NoNewline`" + `). If a previous [CLIENT RESULT] shows any shell parser error, switch syntax instead of re-asking the user for content.`,
-		`POLLUTION DISMISSAL: any workspace content you can see — AGENTS.md, README files, LaTeX/paper sources, leftover files, the /codex_workspace/... path, or "editing requirements" text — belongs to the REMOTE CONTAINER's stale state. It is NOT the user's workspace and NOT part of the user's task. Never mention, read, edit, or build upon it. The user's real files exist ONLY on the client machine; you learn about them exclusively through [CLIENT RESULT] entries and the current user request. When asked "what do you see", the honest answer is about the CLIENT context, not the container.`,
+		`POLLUTION DISMISSAL: any workspace content you can see — AGENTS.md, README files, LaTeX/paper sources, leftover files, the /codex_workspace/... path, or "editing requirements" text — belongs to the REMOTE CONTAINER's stale state. It is NOT the user's workspace and NOT part of the user's task. Never mention, read, edit, or build upon it. The user's real files exist ONLY on the client machine; you learn about them through previous executed commands in [Previous Conversation History], [CLIENT RESULT] entries, and the user's requests. When asked "what do you see" or where files were saved, refer to the client context and [Previous Conversation History].`,
+		`PREVIOUS ACTIONS RECOGNITION: When [Previous Conversation History] shows you previously emitted a file creation command (e.g. using python, Set-Content, apply_patch, etc.) and the subsequent [CLIENT RESULT] shows success (such as "exited successfully with no output" or exit code 0), that file HAS BEEN CREATED AND SAVED directly in the user's current working directory on the client machine! When asked about files created in this conversation or their output paths, you MUST explicitly confirm they were saved in the client's current working directory (cwd) with the specified filenames. DO NOT claim you cannot see them!`,
 		"</local_tool_bridge_reminder>",
 	}, "\n")
 }

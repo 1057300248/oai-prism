@@ -2,6 +2,7 @@ package facade
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -96,6 +97,10 @@ type RunResult struct {
 	DeltaFiles []prism.CodexDeltaFile
 	// OutputItems 是响应条目集合
 	OutputItems []prism.CodexOutputItem
+
+	// ListenSnapshot 是沙箱内 codex 会话状态指针（codex_session_id / transcript_cursor 等），
+	// 下一轮 start 必须原样回传 —— 这是多轮上下文续接和复用沙箱会话的关键钥匙。
+	ListenSnapshot json.RawMessage
 
 	AccountID  string
 	ProjectID  string
@@ -422,6 +427,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 
 	result.RequestID = requestID
 	result.ConversationID = convID
+	if len(startResp.ListenSnapshot) > 0 {
+		result.ListenSnapshot = startResp.ListenSnapshot
+	}
 
 	if requestID != "" {
 		r.journal.RecordStart(requestID, convID, acct.ID, projectID, turnState)
@@ -568,6 +576,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		}
 		if len(st.OutputItems) > 0 {
 			result.OutputItems = st.OutputItems
+		}
+		if len(st.ListenSnapshot) > 0 {
+			result.ListenSnapshot = st.ListenSnapshot
 		}
 
 		if st.Delta != "" {
@@ -768,14 +779,14 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 	var tokenErr error
 	tokenStage := ""
 	var resourceToken *prism.ResourceToken
-	// 3 次尝试 + 递增退避（1.5s/3s）：风控风暴期单次重试不够
-	//（2026-10-03 实测连续两次 403 后才恢复）。
-	for attempt := 1; attempt <= 3; attempt++ {
+	// 5 次尝试 + 递增退避（2s/4s/6s/8s）：风控风暴期单次重试不够
+	// 充分自愈，彻底避免抛给客户端导致断流重连。
+	for attempt := 1; attempt <= 5; attempt++ {
 		if attempt > 1 {
 			select {
 			case <-ctx.Done():
 				return false
-			case <-time.After(time.Duration(attempt-1) * 1500 * time.Millisecond):
+			case <-time.After(time.Duration(attempt-1) * 2000 * time.Millisecond):
 			}
 			r.log.Info("重试资源令牌签发/交付", "account", acct.ID, "project", projectID, "attempt", attempt)
 		}

@@ -26,6 +26,7 @@ package facade
 // 第二轮起自动重建链条，不影响正确性（只会丢一次上下文）。
 
 import (
+	"encoding/json"
 	"strings"
 	"sync"
 	"time"
@@ -42,10 +43,12 @@ const (
 )
 
 type sessionChainEntry struct {
+	ProjectID      string
 	ConversationID string
 	ResponseID     string // 上一轮回复句柄 —— 关联用途（上游不代管历史）
 	AccountID      string
 	Model          string
+	ListenSnapshot json.RawMessage
 	History        []ChatMessage // 本会话累积的对话历史（user/assistant 交替）
 	UpdatedAt      time.Time
 }
@@ -199,9 +202,9 @@ func lastUserText(input []prism.InputItem) string {
 	return ""
 }
 
-// sessionChainPut 记录本轮的上游会话句柄。
-func sessionChainPut(key, conversationID, responseID, accountID, model string) {
-	if strings.TrimSpace(key) == "" || strings.TrimSpace(conversationID) == "" {
+// sessionChainRecord 统一记录本轮的上游会话句柄、快照与项目。
+func sessionChainRecord(key string, res *RunResult, model string) {
+	if strings.TrimSpace(key) == "" || res == nil {
 		return
 	}
 	sessionChain.mu.Lock()
@@ -217,12 +220,50 @@ func sessionChainPut(key, conversationID, responseID, accountID, model string) {
 		e = &sessionChainEntry{}
 		sessionChain.entries[key] = e
 	}
-	// 只更新句柄字段，保留累积的 History（否则每轮 put 都会把历史清空）。
-	e.ConversationID = conversationID
-	e.ResponseID = responseID
-	e.AccountID = accountID
-	e.Model = model
+	if res.ProjectID != "" {
+		e.ProjectID = res.ProjectID
+	}
+	if res.ConversationID != "" {
+		e.ConversationID = res.ConversationID
+	}
+	if res.ResponseID != "" {
+		e.ResponseID = res.ResponseID
+	} else if res.RequestID != "" && e.ResponseID == "" {
+		e.ResponseID = res.RequestID
+	}
+	if res.AccountID != "" {
+		e.AccountID = res.AccountID
+	}
+	if model != "" {
+		e.Model = model
+	}
+	if len(res.ListenSnapshot) > 0 {
+		e.ListenSnapshot = res.ListenSnapshot
+	}
 	e.UpdatedAt = time.Now()
+}
+
+// sessionChainGet 取本会话已绑定的项目 ID、会话 ID、上轮响应 ID 与沙箱会话快照。
+func sessionChainGet(key string) (projectID, convID, prevRespID, acctID string, snapshot json.RawMessage) {
+	if strings.TrimSpace(key) == "" {
+		return "", "", "", "", nil
+	}
+	sessionChain.mu.RLock()
+	defer sessionChain.mu.RUnlock()
+	e, ok := sessionChain.entries[key]
+	if !ok || time.Since(e.UpdatedAt) > sessionChainTTL {
+		return "", "", "", "", nil
+	}
+	return e.ProjectID, e.ConversationID, e.ResponseID, e.AccountID, e.ListenSnapshot
+}
+
+// sessionChainPut 记录本轮的上游会话句柄（兼容老调用点）。
+func sessionChainPut(key, conversationID, responseID, accountID, model string) {
+	sessionChainRecord(key, &RunResult{
+		ConversationID: conversationID,
+		ResponseID:     responseID,
+		AccountID:      accountID,
+	}, model)
 }
 
 // chainConv 安全取 RunResult 的会话句柄（res 为 nil 时返回空）。

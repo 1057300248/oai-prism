@@ -162,40 +162,88 @@ func bindLogAccount(r *http.Request, res *RunResult) {
 // 推导顺序：
 //  1. 显式头 X-Oaiprism-Session（客户端最清楚自己在聊哪个会话）
 //  2. body.user（OpenAI 的 user 字段通常被用来放终端用户 ID）
-//  3. 对 system + 首条 user 消息做指纹
+//  3. 从 client_metadata / prompt_cache_key / conversation_id / user 提取会话键
+//  4. 对首条 user 消息做稳定指纹（严禁包含会被折叠历史污染的 system 消息）
 //
-// 第 3 条是关键：绝大多数客户端不带任何会话标识，
-// 但同一个会话的前缀是稳定的，取指纹就能让后续轮次命中同一个账号与项目。
-// 若全都拿不到，返回空串——上层会退化为轮转分桶，仍然是正确的，
-// 只是少了缓存命中。
+// 绝大多数客户端不带专有 Header，但 Codex CLI 会带 client_metadata 或 prompt_cache_key，
+// 即使都不带，首条 user 消息（首问）在多轮中也是绝对不变的，取指纹就能让后续轮次
+// 100% 命中同一个账号与项目，彻底杜绝每轮新建 Project 与沙箱重新申请。
 func conversationKey(r *http.Request, body map[string]json.RawMessage, msgs []ChatMessage) string {
 	if v := strings.TrimSpace(r.Header.Get(HeaderSession)); v != "" {
 		return "h:" + v
 	}
-	if raw, ok := body["user"]; ok {
+
+	// 1. client_metadata（Codex CLI 0.15x / 0.16x 关键会话键）
+	if raw, ok := body["client_metadata"]; ok && len(raw) > 0 {
+		var cm map[string]any
+		if err := json.Unmarshal(raw, &cm); err == nil {
+			for _, k := range []string{"session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"} {
+				if v, ok := cm[k].(string); ok && strings.TrimSpace(v) != "" {
+					return "cm:" + strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+
+	// 2. prompt_cache_key
+	if raw, ok := body["prompt_cache_key"]; ok && len(raw) > 0 {
+		var pck string
+		if err := json.Unmarshal(raw, &pck); err == nil && strings.TrimSpace(pck) != "" {
+			return "pck:" + strings.TrimSpace(pck)
+		}
+	}
+
+	// 3. conversation_id / session_id / metadata
+	if raw, ok := body["conversation_id"]; ok && len(raw) > 0 {
+		var cid string
+		if err := json.Unmarshal(raw, &cid); err == nil && strings.TrimSpace(cid) != "" {
+			return "cid:" + strings.TrimSpace(cid)
+		}
+	}
+	if raw, ok := body["conversationId"]; ok && len(raw) > 0 {
+		var cid string
+		if err := json.Unmarshal(raw, &cid); err == nil && strings.TrimSpace(cid) != "" {
+			return "cid:" + strings.TrimSpace(cid)
+		}
+	}
+	if raw, ok := body["session_id"]; ok && len(raw) > 0 {
+		var sid string
+		if err := json.Unmarshal(raw, &sid); err == nil && strings.TrimSpace(sid) != "" {
+			return "sid:" + strings.TrimSpace(sid)
+		}
+	}
+	if raw, ok := body["metadata"]; ok && len(raw) > 0 {
+		var md map[string]any
+		if err := json.Unmarshal(raw, &md); err == nil {
+			for _, k := range []string{"session_id", "sessionId", "thread_id", "threadId", "conversation_id", "conversationId"} {
+				if v, ok := md[k].(string); ok && strings.TrimSpace(v) != "" {
+					return "md:" + strings.TrimSpace(v)
+				}
+			}
+		}
+	}
+
+	// 4. user 字段
+	if raw, ok := body["user"]; ok && len(raw) > 0 {
 		var u string
 		if err := json.Unmarshal(raw, &u); err == nil && strings.TrimSpace(u) != "" {
 			return "u:" + strings.TrimSpace(u)
 		}
 	}
-	var sb strings.Builder
+
+	// 5. 首条 user 消息采样指纹（严禁包含 system 消息，因为折叠历史会让 system 每轮剧变导致哈希漂移！）
 	for _, m := range msgs {
-		if m.Role == "system" || m.Role == "developer" {
-			sb.WriteString(m.Content.Text())
-			sb.WriteByte('\n')
-		}
-	}
-	for _, m := range msgs {
-		if m.Role == "user" {
-			sb.WriteString(m.Content.Text())
+		if strings.EqualFold(m.Role, "user") {
+			txt := strings.TrimSpace(m.Content.Text())
+			if txt != "" {
+				sum := sha256.Sum256([]byte(txt))
+				return "f:u:" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10])
+			}
 			break
 		}
 	}
-	if sb.Len() == 0 {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(sb.String()))
-	return "f:" + base32.StdEncoding.WithPadding(base32.NoPadding).EncodeToString(sum[:10])
+
+	return ""
 }
 
 // metadataWith 构造上游要的 metadata 容器。
