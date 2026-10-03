@@ -803,6 +803,13 @@ func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
 		start := time.Now()
 		var model string
 
+		// SSE 内部失败的错误通道：流式响应的 HTTP 状态永远是 200，
+		// 真正的失败只存在于事件流里。facade 在失败点调
+		// middleware.RecordLogError 写进来，这里落库 —— 否则流水里
+		// 会出现"200 + 2ms + 无错误"的迷惑记录（2026-10-03 实证）。
+		logErrBox := &middleware.LogErrorBox{}
+		r = r.WithContext(context.WithValue(r.Context(), middleware.CtxKeyLogError{}, logErrBox))
+
 		if r.Body != nil && (r.Method == http.MethodPost || r.Method == http.MethodPut) {
 			bodyBytes, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
 			if err == nil {
@@ -844,6 +851,11 @@ func (s *Server) requestAuditMiddleware(next http.Handler) http.Handler {
 			DurationMs: duration,
 			ClientIP:   clientIP,
 			UserAgent:  r.UserAgent(),
+		}
+		// SSE 内部失败（response.failed / SSE error 事件）在这里补记 ——
+		// HTTP 状态码帮不上忙，错误只存在事件流里。
+		if errs := middleware.LogErrors(r.Context()); len(errs) > 0 {
+			item.ErrorMessage = strings.Join(errs, " | ")
 		}
 
 		go func() {

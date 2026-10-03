@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/oai-prism/oaiprism/internal/creds"
+	"github.com/oai-prism/oaiprism/internal/middleware"
 	"github.com/oai-prism/oaiprism/internal/prism"
 	"github.com/oai-prism/oaiprism/internal/sse"
 )
@@ -197,6 +198,8 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 		// 这样客户端至少能拿到一个明确的失败信号而不是超时。
 		if !errors.Is(runErr, context.Canceled) {
 			h.log.Warn("流式生成中断", "id", id, "err", runErr)
+			// HTTP 200 已发出，把失败原因记进请求日志（异常错误摘要）。
+			middleware.RecordLogError(r, "chat 流式失败: %v", runErr)
 			buf = append(buf[:0], `{"error":{"message":`...)
 			buf = sse.AppendJSONString(buf, runErr.Error())
 			buf = append(buf, `,"type":"upstream_error"}}`...)
@@ -272,6 +275,7 @@ func (h *Handler) syncChat(w http.ResponseWriter, r *http.Request, runReq *RunRe
 	}
 	if err != nil {
 		status, typ, msg := mapError(err)
+		middleware.RecordLogError(r, "chat 同步失败: %s", msg)
 		writeError(w, status, typ, msg)
 		return
 	}

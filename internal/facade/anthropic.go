@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/oai-prism/oaiprism/internal/middleware"
 	"github.com/oai-prism/oaiprism/internal/prism"
 	"github.com/oai-prism/oaiprism/internal/sse"
 )
@@ -202,6 +203,7 @@ func (h *Handler) syncAnthropic(w http.ResponseWriter, r *http.Request, runReq *
 	}
 	if err != nil {
 		status, typ, msg := mapError(err)
+		middleware.RecordLogError(r, "anthropic 同步失败: %s", msg)
 		writeError(w, status, typ, msg)
 		return
 	}

@@ -11,6 +11,7 @@ package middleware
 import (
 	"context"
 	"crypto/subtle"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"runtime/debug"
@@ -39,6 +40,56 @@ func RequestID(ctx context.Context) string {
 // WithRequestID 写入请求 ID。
 func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKeyRequestID, id)
+}
+
+// CtxKeyLogError 是"请求日志错误摘要"的通道键。
+//
+// SSE 场景下 HTTP 状态码早已是 200（响应头在首帧前就发出），
+// 真正的失败只存在于事件流里 —— 审计中间件从响应上什么都看不到。
+// 不记的话，请求流水里会出现"200 + 2ms + 无错误"的记录，
+// 排障时完全看不出这次请求其实失败了（2026-10-03 Codex 断流排查实证）。
+// facade 通过 RecordLogError 写入，审计中间件落库时一并记录。
+type CtxKeyLogError struct{}
+
+// LogErrorBox 是并发安全的错误收集器 —— handler 可能在多个
+// goroutine 里写（流式主流程、心跳、桥回调），落库在另一个 goroutine 读。
+type LogErrorBox struct {
+	mu   sync.Mutex
+	msgs []string
+}
+
+func (b *LogErrorBox) append(msg string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	// 摘要截断：错误文本可能包含整段上游响应体。
+	if len(msg) > 400 {
+		msg = msg[:400]
+	}
+	b.msgs = append(b.msgs, msg)
+}
+
+func (b *LogErrorBox) snapshot() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	out := make([]string, len(b.msgs))
+	copy(out, b.msgs)
+	return out
+}
+
+// RecordLogError 供 handler 在"响应已开始后的内部失败"时记录错误摘要。
+// 未经过审计中间件的请求（单测直调 handler）调用它是无害的 no-op。
+func RecordLogError(r *http.Request, format string, args ...any) {
+	if box, ok := r.Context().Value(CtxKeyLogError{}).(*LogErrorBox); ok {
+		box.append(fmt.Sprintf(format, args...))
+	}
+}
+
+// LogErrors 取出本请求已记录的错误摘要（审计中间件用）。
+func LogErrors(ctx context.Context) []string {
+	if box, ok := ctx.Value(CtxKeyLogError{}).(*LogErrorBox); ok {
+		return box.snapshot()
+	}
+	return nil
 }
 
 // Middleware 是标准签名。

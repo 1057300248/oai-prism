@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/oai-prism/oaiprism/internal/middleware"
 	"github.com/oai-prism/oaiprism/internal/prism"
 	"github.com/oai-prism/oaiprism/internal/sse"
 )
@@ -247,6 +248,10 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 		}
 
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+			// HTTP 200 已经发出（SSE 序言），失败只能靠这条事件与
+			// 请求日志的错误摘要体现 —— 不记的话流水里就是一条
+			// "200 + 2ms + 无错误"的迷惑记录。
+			middleware.RecordLogError(r, "responses 流式失败: %v", runErr)
 			buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
 			_ = sw.WriteRaw(buf)
 			return
@@ -369,6 +374,7 @@ func (h *Handler) streamResponses(w http.ResponseWriter, r *http.Request, runReq
 	}
 
 	if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		middleware.RecordLogError(r, "responses 流式失败: %v", runErr)
 		buf = AppendResponsesEvent(buf[:0], ResponsesEvent{Type: "response.failed", ResponseID: id, Model: publicModel, CreatedAt: created, Text: runErr.Error()})
 		_ = sw.WriteRaw(buf)
 		return
@@ -407,6 +413,7 @@ func (h *Handler) syncResponses(w http.ResponseWriter, r *http.Request, runReq *
 	}
 	if err != nil {
 		status, typ, msg := mapError(err)
+		middleware.RecordLogError(r, "responses 同步失败: %s", msg)
 		writeError(w, status, typ, msg)
 		return
 	}

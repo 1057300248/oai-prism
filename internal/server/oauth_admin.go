@@ -44,7 +44,7 @@ const (
 	oauthAuthorizeURL = "https://auth.openai.com/oauth/authorize"
 	oauthTokenURL     = "https://auth.openai.com/oauth/token"
 	oauthScope        = "openid profile email offline_access"
-	oauthSessionTTL = 30 * time.Minute
+	oauthSessionTTL   = 30 * time.Minute
 )
 
 // oauthSession 一次授权流程的全部状态。
@@ -64,9 +64,9 @@ type oauthSession struct {
 // oauthSessionStore 管理进行中的授权会话（内存态，进程生命周期一致）。
 // 主键两种：state（回调反查）与 session_id（前端轮询/手动兜底）。
 type oauthSessionStore struct {
-	mu       sync.Mutex
-	byState  map[string]*oauthSession
-	byID     map[string]*oauthSession
+	mu      sync.Mutex
+	byState map[string]*oauthSession
+	byID    map[string]*oauthSession
 }
 
 var oauthSessions = &oauthSessionStore{

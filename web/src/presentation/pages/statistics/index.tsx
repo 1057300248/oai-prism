@@ -450,6 +450,7 @@ export const StatisticsPage: React.FC = () => {
           columns={requestLogColumns}
           dataSource={requestLogs}
           loading={logsLoading}
+          scroll={{ x: 'max-content' }}
           pagination={{
             current: logsPage,
             pageSize: logsPageSize,
@@ -473,10 +474,11 @@ export const StatisticsPage: React.FC = () => {
           </Button>,
         ]}
         width={700}
+        styles={{ body: { maxHeight: '68vh', overflowY: 'auto' } }}
         destroyOnHidden
       >
         {selectedLog && (
-          <Descriptions bordered column={2} size="small" style={{ marginTop: 12 }}>
+          <Descriptions bordered column={{ xs: 1, sm: 2 }} size="small" style={{ marginTop: 12 }}>
             <Descriptions.Item label="请求 ID" span={2}>
               <Text code copyable>{selectedLog.id}</Text>
             </Descriptions.Item>
@@ -511,20 +513,20 @@ export const StatisticsPage: React.FC = () => {
               {selectedLog.clientIp || '127.0.0.1'}
             </Descriptions.Item>
             <Descriptions.Item label="User-Agent" span={2}>
-              <Tooltip title={selectedLog.userAgent || '-'}>
-                <Text
-                  style={{
-                    fontSize: 12,
-                    color: '#666',
-                    display: 'block',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {selectedLog.userAgent || '-'}
-                </Text>
-              </Tooltip>
+              {/* 详情弹窗的价值就是看全量信息：UA 允许多行换行展示，
+                  不做单行省略 —— 截断后尾部版本号丢失反而误导排障。 */}
+              <Text
+                style={{
+                  fontSize: 12,
+                  color: '#666',
+                  display: 'block',
+                  wordBreak: 'break-all',
+                  whiteSpace: 'normal',
+                  lineHeight: 1.6,
+                }}
+              >
+                {selectedLog.userAgent || '-'}
+              </Text>
             </Descriptions.Item>
             {selectedLog.errorMessage && (
               <Descriptions.Item label="异常错误摘要" span={2}>

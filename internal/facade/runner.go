@@ -707,6 +707,17 @@ func (r *Runner) ensureSandbox(ctx context.Context, acct *account.Account, proje
 	return sb, nil
 }
 
+// isSentinelThrottle 判断是否为上游 Sentinel 风控的偶发拒绝：
+// HTTP 403 + "Request verification failed"（"Please try again"）。
+// 实测重试即恢复，与凭据失效无关 —— 凭据失效是 401，走另一条处理路径。
+func isSentinelThrottle(err error) bool {
+	var apiErr *creds.APIError
+	if !errors.As(err, &apiErr) {
+		return false
+	}
+	return apiErr.Status == 403 && strings.Contains(apiErr.Body, "verification")
+}
+
 // syncSandboxWorkspace 保证沙箱已为该项目完成工作区同步。
 //
 // 这是整条链路里最容易漏、也最难定位的一步。完整四步（都已实测）：
@@ -746,18 +757,55 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 	started := time.Now()
 
-	// 1) 后端签发资源令牌（绑定本项目，实测 1 小时有效）
-	rt, err := r.client.AcquireResourceToken(ctx, p, projectID, sb.SessionID, sb.Token)
-	if err != nil {
-		r.log.Warn("签发沙箱资源令牌失败", "account", acct.ID, "project", projectID, "err", err)
-		r.app.SandboxOps.Inc("sync", "token_error")
-		return false
+	// 1)+2) 签发并交付资源令牌（绑定本项目，实测 1 小时有效）。
+	//
+	// 上游对 Sentinel token 的校验存在**偶发风控抖动**：HTTP 403
+	// "Request verification failed. Please try again."（2026-10-03
+	// Codex 首连实测命中在交付步；此前大请求也偶发于 status 轮询步）。
+	// 该错误重试即恢复 —— 但若直接把"沙箱异常"抛给客户端，Codex CLI
+	// 会断流重连，用户看到假警报。因此在这里内部自愈一次：
+	// 只对风控类 403 重签重交；凭据失效（401）等终态错误不重试。
+	var tokenErr error
+	tokenStage := ""
+	var resourceToken *prism.ResourceToken
+	for attempt := 1; attempt <= 2; attempt++ {
+		if attempt > 1 {
+			select {
+			case <-ctx.Done():
+				return false
+			case <-time.After(1500 * time.Millisecond):
+			}
+			r.log.Info("重试资源令牌签发/交付", "account", acct.ID, "project", projectID, "attempt", attempt)
+		}
+		tokenStage = "签发"
+		rt, err := r.client.AcquireResourceToken(ctx, p, projectID, sb.SessionID, sb.Token)
+		if err != nil {
+			tokenErr = err
+			if isSentinelThrottle(err) {
+				continue
+			}
+			break
+		}
+		tokenStage = "交付"
+		if err = r.client.DeliverResourceToken(ctx, p, sb, rt, projectID); err != nil {
+			tokenErr = err
+			if isSentinelThrottle(err) {
+				continue
+			}
+			break
+		}
+		tokenErr = nil
+		resourceToken = rt
+		break
 	}
-
-	// 2) 交给沙箱
-	if err := r.client.DeliverResourceToken(ctx, p, sb, rt, projectID); err != nil {
-		r.log.Warn("交付资源令牌失败", "account", acct.ID, "err", err)
-		r.app.SandboxOps.Inc("sync", "deliver_error")
+	if tokenErr != nil {
+		if tokenStage == "交付" {
+			r.log.Warn("交付资源令牌失败", "account", acct.ID, "err", tokenErr)
+			r.app.SandboxOps.Inc("sync", "deliver_error")
+		} else {
+			r.log.Warn("签发沙箱资源令牌失败", "account", acct.ID, "project", projectID, "err", tokenErr)
+			r.app.SandboxOps.Inc("sync", "token_error")
+		}
 		return false
 	}
 
@@ -790,7 +838,7 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 
 	// 用资源令牌的过期时间做缓存失效点：令牌一过期，沙箱就读不到
 	// 项目文件了，与其等失败再重试，不如到点主动重同步。
-	r.sandboxes.MarkSynced(acct.ID, projectID, rt.Expiry())
+	r.sandboxes.MarkSynced(acct.ID, projectID, resourceToken.Expiry())
 	r.log.Info("沙箱工作区已就绪",
 		"account", acct.ID, "project", projectID, "耗时", time.Since(started).Round(time.Millisecond))
 	r.app.SandboxOps.Inc("sync", "ok")
