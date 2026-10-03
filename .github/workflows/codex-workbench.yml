@@ -1,0 +1,63 @@
+name: Codex Contract Workbench
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+    paths: [.github/workflows/codex-workbench.yml]
+permissions:
+  contents: read
+jobs:
+  contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Install pinned CLI and inspect public source
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/codex-tools /tmp/codex-evidence
+          cd /tmp/codex-tools
+          npm init -y >/dev/null
+          npm install --save-exact @openai/codex@0.160.0
+          ./node_modules/.bin/codex --version | tee /tmp/codex-evidence/version.txt
+          ./node_modules/.bin/codex exec --help > /tmp/codex-evidence/exec-help.txt
+          ./node_modules/.bin/codex review --help > /tmp/codex-evidence/review-help.txt
+          curl --fail --location --max-time 60 https://api.github.com/repos/openai/codex/tarball/rust-v0.160.0 -o /tmp/codex-evidence/codex-source.tar.gz
+      - name: Capture harmless CLI request without a real model
+        run: |
+          python - <<'PY'
+          import http.server,json,threading,tempfile,pathlib,subprocess,os,time
+          out=pathlib.Path('/tmp/codex-evidence')
+          class Handler(http.server.BaseHTTPRequestHandler):
+              def do_POST(self):
+                  raw=self.rfile.read(int(self.headers.get('Content-Length','0')))
+                  try: body=json.loads(raw)
+                  except Exception: body={'decode_error':True,'length':len(raw),'encoding':self.headers.get('Content-Encoding')}
+                  (out/'request.json').write_text(json.dumps(body,indent=2))
+                  (out/'request-path.txt').write_text(self.path)
+                  response={'id':'resp_fixture','object':'response','created_at':int(time.time()),'model':'gpt-5.4','status':'completed','output':[{'id':'msg_fixture','type':'message','role':'assistant','status':'completed','content':[{'type':'output_text','text':'Fixture finished.','annotations':[]}]}],'usage':{'input_tokens':10,'output_tokens':3,'total_tokens':13},'error':None,'incomplete_details':None}
+                  self.send_response(200);self.send_header('Content-Type','text/event-stream');self.end_headers()
+                  for i,(typ,payload) in enumerate([('response.created',{'response':dict(response,status='in_progress',output=[])}),('response.output_item.done',{'output_index':0,'item':response['output'][0]}),('response.completed',{'response':response})]):
+                      event=dict(payload,type=typ,sequence_number=i)
+                      self.wfile.write(('event: '+typ+'\ndata: '+json.dumps(event)+'\n\n').encode());self.wfile.flush()
+              def log_message(self,*args):pass
+          server=http.server.ThreadingHTTPServer(('127.0.0.1',18789),Handler);threading.Thread(target=server.serve_forever,daemon=True).start()
+          with tempfile.TemporaryDirectory() as work,tempfile.TemporaryDirectory() as home:
+              subprocess.run(['git','init','-q',work],check=True)
+              env=dict(os.environ,CODEX_HOME=home,FIXTURE_KEY='not-a-real-key')
+              cmd=['/tmp/codex-tools/node_modules/.bin/codex','exec','--json','--sandbox','read-only','-C',work,'-c','model_provider="fixture"','-c','model="gpt-5.4"','-c','model_providers.fixture={name="fixture",base_url="http://127.0.0.1:18789/v1",wire_api="responses",env_key="FIXTURE_KEY"}','-c','web_search="disabled"','Reply with one sentence. Do not execute any tools.']
+              result=subprocess.run(cmd,env=env,capture_output=True,text=True,timeout=60)
+              (out/'codex-stdout.txt').write_text(result.stdout);(out/'codex-stderr.txt').write_text(result.stderr);(out/'exit-code.txt').write_text(str(result.returncode))
+              print('CLI exit:',result.returncode);print(result.stderr[-3000:])
+          server.shutdown()
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pinned-codex-contract
+          path: /tmp/codex-evidence/
+          retention-days: 1
