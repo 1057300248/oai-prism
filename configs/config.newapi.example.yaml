@@ -2,7 +2,7 @@
 # workbench profile. It never exposes /admin, /dashboard or /prism routes.
 # Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
 # Supply your own authorized upstream credentials in the separately mounted file.
-# Context/cache behavior and activation: ../CONTEXT_CACHE.md
+# Context/cache behavior: ../CONTEXT_CACHE.md; Codex/catalog: ../CODEX_GATEWAY.md
 server:
   host: 127.0.0.1
   port: 8787
@@ -67,6 +67,20 @@ facade:
     prompt_tools: true
     structured_output: true
     local_output_limit: true
+    # Enable for the tested Codex 0.160.0 function/custom/namespace contract.
+    # Client tools remain client-owned; this does not grant server execution.
+    codex_tools: false
+    catalog:
+      refresh_interval: 5m
+      max_age: 1h
+      publish: [] # Explicit public model IDs; discovery never changes NewAPI prices.
+      sources: [] # One operator-owned source per existing account-pool ID.
+      # Example only after observing authorized metadata (see CODEX_GATEWAY.md):
+      # sources:
+      #   - name: account-a-models
+      #     account_id: YOUR_EXISTING_ACCOUNT_POOL_ID
+      #     path: /var/lib/oaiprism/catalog/account-a.json
+      # publish: [YOUR_OBSERVED_PUBLIC_MODEL_ID]
     # Images require authoritative upstream usage. Enable after a live contract check.
     # Context-budget estimation with images is deliberately unsupported.
     inline_images: false
