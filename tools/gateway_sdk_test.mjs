@@ -32,7 +32,8 @@ const second = await client.responses.create({model: 'test-model', previous_resp
   input: [{type: 'function_call_output', call_id: call.call_id, output: 'sunny'}], tools: [tool], store: false});
 assert.equal(second.output_text, 'The weather is sunny.');
 assert.equal((await client.responses.retrieve(first.id)).id, first.id);
-assert.equal((await client.responses.delete(first.id)).deleted, true);
+await client.responses.delete(first.id);
+await assert.rejects(client.responses.retrieve(first.id), error => error.status === 404);
 
 const failed = await client.responses.create({model: 'partial-failure', input: 'hello', stream: true, store: false});
 const types = [];
