@@ -1,0 +1,98 @@
+# Copy to a private config file. This is the GATEWAY profile, not the browser
+# workbench profile. It never exposes /admin, /dashboard or /prism routes.
+# Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
+# Supply your own authorized upstream credentials in the separately mounted file.
+server:
+  host: 127.0.0.1
+  port: 8787
+  read_header_timeout: 10s
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 120s
+  max_header_bytes: 65536
+  max_body_bytes: 12582912
+  cors_origin: ""
+
+upstream:
+  # Existing transport service must be running and reachable from this process.
+  # This configuration does NOT provision a browser/oracle or bypass upstream access controls.
+  base_url: http://127.0.0.1:8790
+  timeout: 0s
+  dial_timeout: 10s
+  tls_handshake_timeout: 10s
+  response_header_timeout: 120s
+  insecure_skip_verify: false
+  max_retries: 0
+  force_http2: false
+
+creds:
+  mode: file
+  file: /var/lib/oaiprism/accounts.json
+  reload_interval: 5s
+  auto_refresh: true
+  persist_refresh: false
+  accounts: []
+
+pool:
+  strategy: least_inflight
+  health_check: true
+  max_wait: 5s
+  cooldown: 60s
+
+facade:
+  enabled: true
+  api_keys: [] # Required through OAI_PRISM_API_KEYS; empty keys prevent gateway startup.
+  # Replace the upstream model value with a model you have actually validated.
+  default_model: prism-text
+  models:
+    prism-text:
+      model: REPLACE_WITH_VERIFIED_PRISM_MODEL
+      reasoning_effort: medium
+  default_system_prompt: ""
+  use_sandbox: true
+  reuse_project: false
+  max_poll_timeout: 6m
+  sync_timeout: 6m
+  poll_interval: 1s
+  poll_backoff_max: 5s
+  rate_per_second: 2
+  rate_burst: 4
+  gateway:
+    enabled: true
+    timeout: 6m
+    max_concurrent: 8
+    usage_policy: estimate
+    # These are explicit compatibility emulations, not upstream-native capabilities.
+    prompt_tools: true
+    structured_output: true
+    local_output_limit: true
+    # Images require authoritative upstream usage. Enable after a live contract check.
+    inline_images: false
+    # Safe default when NewAPI shares one channel key across end users:
+    response_store: false
+    tenant_header: ""
+    trusted_peers: []
+    store_path: ""
+    store_key_env: ""
+
+# To enable response storage, an authenticated reverse proxy MUST overwrite the
+# chosen tenant header with the real verified user ID. Never forward a client-
+# supplied value unchanged. A shared/static header does not isolate end users.
+# Example overrides, only after this identity contract has been established:
+#   response_store: true
+#   tenant_header: X-Verified-Tenant
+#   trusted_peers: ["127.0.0.1/32"]
+#   store_path: /var/lib/oaiprism/responses.sqlite
+#   store_key_env: OAI_PRISM_RESPONSE_STORE_KEY
+# The referenced environment variable must contain base64 of 32 random bytes.
+
+capture:
+  enabled: false
+metrics:
+  enabled: true
+  health: /healthz
+  ready: /readyz
+  path: /metrics
+log:
+  level: info
+  format: json
