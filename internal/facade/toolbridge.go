@@ -230,18 +230,14 @@ func foldInputHistory(items []prism.InputItem) []prism.InputItem {
 	history := "\n\n[Previous Conversation History]\n" + sb.String()
 
 	if strings.EqualFold(items[0].Role, "system") && len(items[0].Content) > 0 {
-		// 首条已是 system：历史追加进它的第一个文本块。
+		// 首条已是 system：历史追加进它的第一个文本块作为全局认知强化。
 		items[0].Content[0].Text += history
-		out := make([]prism.InputItem, 0, 2+1)
-		out = append(out, items[0])
-		out = append(out, items[lastIdx:]...)
-		return out
 	}
-	// 没有 system（罕见）：历史条目整体前插为一条 system。
-	out := make([]prism.InputItem, 0, 2+1)
-	out = append(out, prism.NewSystemItem("[Previous Conversation History]\n"+sb.String()))
-	out = append(out, items...)
-	return out
+
+	// 关键：必须完整保留客户端传入的全部上下文条目，绝不截断删除中间消息！
+	// 本地 Codex CLI 自行控制上下文窗口（达到 256K 会自行触发 compress），
+	// 网关完整透传每一轮 User/Assistant/Tool 消息，模型才能直接认知多轮身份与对话细节。
+	return items
 }
 
 // osDirective 从客户端 User-Agent 推断操作系统，生成一段写进桥

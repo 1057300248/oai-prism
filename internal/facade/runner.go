@@ -325,10 +325,15 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// status:"completed" + response.status:"error"、reason="sandbox_reconnecting"，
 	// 看起来像"上游挂了"，实际上是"你没给我沙箱"。
 	// 上游的 codexRequestDebug 里会直接写 sandbox_url_resolved: null。
-	sb, err := r.ensureSandbox(ctx, acct, projectID)
-	if err != nil {
-		r.log.Warn("申请沙箱失败，尝试不带沙箱继续", "account", acct.ID, "err", err)
-		r.app.SandboxOps.Inc("acquire", "error")
+	var sb *prism.Sandbox
+	if !req.IsAux {
+		s, err := r.ensureSandbox(ctx, acct, projectID)
+		if err != nil {
+			r.log.Warn("申请沙箱失败，尝试不带沙箱继续", "account", acct.ID, "err", err)
+			r.app.SandboxOps.Inc("acquire", "error")
+		} else {
+			sb = s
+		}
 	}
 
 	// 2.5) 工作区同步：**只申请沙箱是不够的**。
@@ -384,7 +389,10 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 多轮上下文 = 每轮新 project（reuse_project: false）+ 全量历史，
 	// 不再叠加任何变换。
 
-	var startResp *prism.StartResponse
+	var (
+		startResp *prism.StartResponse
+		err       error
+	)
 	// 沙箱冷启动时上游会回 504 文案并提示 "Please submit prompt again"，
 	// 这是上游自己建议的处理方式 —— 照做即可，不要当成协议错误。
 	for attempt := 1; attempt <= sandboxStartRetries; attempt++ {
@@ -981,11 +989,8 @@ func (r *Runner) ActiveProject(accountID string) (string, bool) {
 func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req *RunRequest) (string, error) {
 	f := &r.cfg.Facade
 
-	// 伴生轻量请求：优先复用活跃项目，若无活跃项目则降级无项目继续，绝不独立建项目。
+	// 伴生轻量请求（标题/摘要生成）：纯文本推理，绝不绑定或创建项目与沙箱
 	if req.IsAux {
-		if activeID, ok := r.projects.GetActive(acct.ID, time.Now()); ok && activeID != "" {
-			return activeID, nil
-		}
 		return "", nil
 	}
 

@@ -439,8 +439,8 @@ func TestFoldInputHistory(t *testing.T) {
 		prism.NewSystemItem("tail-reminder"),
 	}
 	got := foldInputHistory(items)
-	if len(got) != 3 {
-		t.Fatalf("期望 3 条（system + 本轮 user + tail），得到 %d", len(got))
+	if len(got) != len(items) {
+		t.Fatalf("期望完整保留所有 %d 条消息条目，实际得到 %d", len(items), len(got))
 	}
 	sys := got[0].Content[0].Text
 	if !strings.Contains(sys, "[Previous Conversation History]") ||
@@ -451,11 +451,11 @@ func TestFoldInputHistory(t *testing.T) {
 	if !strings.Contains(sys, "bridge-prompt") {
 		t.Fatalf("桥指令丢失:\n%s", sys)
 	}
-	if got[1].Role != "user" || got[1].Content[0].Text != "任务二" {
-		t.Fatalf("最后一条消息应原样保留: %+v", got[1])
+	if got[4].Role != "user" || got[4].Content[0].Text != "任务二" {
+		t.Fatalf("最后一条用户消息应原样保留: %+v", got[4])
 	}
-	if got[2].Content[0].Text != "tail-reminder" {
-		t.Fatalf("尾部提醒应保留在末位: %+v", got[2])
+	if got[len(got)-1].Content[0].Text != "tail-reminder" {
+		t.Fatalf("尾部提醒应保留在末位: %+v", got[len(got)-1])
 	}
 
 	// 短输入（system + user）不折叠。
@@ -484,8 +484,8 @@ func TestFoldInputHistory_FiltersStaticInstructions(t *testing.T) {
 		prism.NewSystemItem("tail-reminder"),
 	}
 	got := foldInputHistory(items)
-	if len(got) != 3 {
-		t.Fatalf("期望 3 条（system + 本轮 user + tail），得到 %d", len(got))
+	if len(got) != len(items) {
+		t.Fatalf("期望完整保留所有 %d 条消息条目，得到 %d", len(items), len(got))
 	}
 	sys := got[0].Content[0].Text
 	if strings.Contains(sys, "# AGENTS.md") {
@@ -494,12 +494,12 @@ func TestFoldInputHistory_FiltersStaticInstructions(t *testing.T) {
 	if !strings.Contains(sys, "请帮我写一个网页") || !strings.Contains(sys, "echo done") {
 		t.Fatalf("真实历史丢失: %s", sys)
 	}
-	if got[1].Content[0].Text != "文件保存在哪里？" {
-		t.Fatalf("当轮用户提问不匹配: %+v", got[1])
+	if got[6].Content[0].Text != "文件保存在哪里？" {
+		t.Fatalf("当轮用户提问不匹配: %+v", got[6])
 	}
 }
 
-// TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution 验证真实 Codex CLI 多轮工具调用的完整输入翻译与折叠
+// TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution 验证真实 Codex CLI 多轮工具调用的完整输入翻译与全量保留
 func TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution(t *testing.T) {
 	rawJSON := `[
 		{"type":"message","role":"developer","content":"You are Codex..."},
@@ -516,8 +516,8 @@ func TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution(t *testing
 	}
 
 	folded := foldInputHistory(items)
-	if len(folded) != 3 {
-		t.Fatalf("期望折叠后保留 3 条 (首条 system + 当轮提问 + tail)，实际得到 %d 条", len(folded))
+	if len(folded) != len(items) {
+		t.Fatalf("期望完整保留所有 %d 条消息条目，实际得到 %d 条", len(items), len(folded))
 	}
 
 	sysText := folded[0].Content[0].Text
@@ -527,8 +527,18 @@ func TestBridgeInputItems_And_FoldInputHistory_MultiTurnToolExecution(t *testing
 	if !strings.Contains(sysText, "(no output)") {
 		t.Fatalf("历史折叠应完整保留上一轮工具调用结果 (no output):\n%s", sysText)
 	}
-	if folded[1].Role != "user" || folded[1].Content[0].Text != "你文件输出的路径在哪里？" {
-		t.Fatalf("第二轮用户提问不匹配: %+v", folded[1])
+	// 确认中间真实消息未被丢弃
+	hasPelican := false
+	for _, it := range folded {
+		for _, c := range it.Content {
+			if strings.Contains(c.Text, "用 HTML 实现一个 SVG") {
+				hasPelican = true
+				break
+			}
+		}
+	}
+	if !hasPelican {
+		t.Fatalf("真实 User 提问在消息流中丢失")
 	}
 }
 
