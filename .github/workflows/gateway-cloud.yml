@@ -12,26 +12,49 @@ concurrency:
 jobs:
   verify:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
           cache: true
-      - name: Go checks
+      - name: Static analysis
+        run: go vet ./...
+      - name: Full Go test suite
         run: |
           set -euo pipefail
-          go vet ./...
-          go test -json ./... > gateway-tests.jsonl
-          go test -race ./...
-          CGO_ENABLED=0 go build -trimpath -o /tmp/oaiprism ./cmd/oaiprism
-      - name: Export source and offline Go module cache for review
+          go test -timeout 120s -count=1 -json ./... > gateway-tests.jsonl
+      - name: Test evidence summary
+        if: always()
+        run: |
+          python - <<'PY'
+          import json, pathlib
+          p=pathlib.Path('gateway-tests.jsonl')
+          events=[]
+          if p.exists():
+              for line in p.read_text().splitlines():
+                  try: events.append(json.loads(line))
+                  except ValueError: print(line)
+          counts={a: sum(e.get('Action')==a and bool(e.get('Test')) for e in events) for a in ('pass','fail','skip')}
+          print('TEST COUNTS',counts)
+          for e in events:
+              text=e.get('Output','')
+              if e.get('Action')=='fail' or any(k in text for k in ('FAIL','panic:','testing.(*','gateway_e2e_test.go','gateway_test.go','store_test.go')):
+                  print(text or e)
+          pathlib.Path('test-counts.json').write_text(json.dumps(counts))
+          PY
+      - name: Race suite
+        run: go test -timeout 180s -race ./...
+      - name: Production binary
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/oaiprism ./cmd/oaiprism
+      - name: Export review evidence
         if: always()
         run: |
           mkdir -p /tmp/gateway-review
+          git rev-parse HEAD > /tmp/gateway-review/commit.txt
           git archive --format=tar HEAD | gzip > /tmp/gateway-review/source.tar.gz
-          cp gateway-tests.jsonl /tmp/gateway-review/ 2>/dev/null || true
+          cp gateway-tests.jsonl test-counts.json /tmp/gateway-review/ 2>/dev/null || true
           go version > /tmp/gateway-review/toolchain.txt
           go list -m all > /tmp/gateway-review/modules.txt || true
       - uses: actions/upload-artifact@v4
