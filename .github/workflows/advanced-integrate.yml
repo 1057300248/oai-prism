@@ -26,20 +26,26 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Integrate declared image catalog and exact test contracts
+      - name: Guarded media and client integration
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           python tools/advanced_fix.py
           python - <<'PY'
           from pathlib import Path
-          p=Path('internal/gateway/model_catalog.go')
-          s=p.read_text();old='result = append(result, CodexModel(model, h.options.CodexTools && h.options.PromptTools))'
-          assert s.count(old)==1
-          p.write_text(s.replace(old,'result = append(result, h.codexModelWithMedia(model))'))
+          files={}
+          def edit(p,old,new):
+              s=files.get(p,Path(p).read_text());assert s.count(old)==1,(p,s.count(old),old[:80]);files[p]=s.replace(old,new)
+          edit('internal/gateway/model_catalog.go','result = append(result, CodexModel(model, h.options.CodexTools && h.options.PromptTools))','result = append(result, h.codexModelWithMedia(model))')
+          edit('internal/gateway/handler.go','inputItemsPage(snapshot, r.URL.Query())','h.ownedInputItemsPage(r.Context(), snapshot, r.URL.Query(), owner)')
+          edit('tools/codex-advanced-fixture/main.go','re:=regexp.MustCompile(`[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`);id:=re.FindString(last);if id==""{return nil,fmt.Errorf("no child ID: %s",last)}','id,e:=spawnedAgentID(outputs[len(outputs)-1]);if e!=nil{return nil,e}')
+          for p,s in files.items():Path(p).write_text(s)
           PY
-          gofmt -w internal/gateway/media_catalog.go internal/gateway/model_catalog.go tools/codex-advanced-fixture
+          gofmt -w internal/gateway internal/server/media_e2e_test.go tools/codex-advanced-fixture
           git diff --check
+          go test -timeout 45s -v ./internal/server -run TestMediaE2E
+          go test -timeout 45s -v ./internal/gateway -run 'TestRevokedFile|TestFiles|TestImageFile'
+          go test ./tools/codex-advanced-fixture
           npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
           python -m pip install openai==3.24.0
           go build -o "$RUNNER_TEMP/advanced-fixture" ./tools/codex-advanced-fixture
@@ -65,23 +71,26 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git rm .github/workflows/advanced-integrate.yml tools/advanced_fix.py
-          git add internal/gateway/media_catalog.go internal/gateway/model_catalog.go tools/codex-advanced-fixture tools/codex_advanced_test.py
-          git commit -m 'feat(codex): integrate tested media catalogs and advanced client contracts'
+          git add internal/gateway internal/server/media_e2e_test.go tools/codex-advanced-fixture tools/codex_advanced_test.py
+          git commit -m 'feat(codex): integrate verified media MCP interactive and child-agent contracts'
           git push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
           git rev-parse HEAD > advanced-source.txt
       - name: Evidence and diagnostics
         if: always()
         run: |
-          tail -120 advanced-evidence/failures.txt || true
+          tail -100 advanced-evidence/failures.txt || true
           python - <<'PY'
           import pathlib,json
           p=pathlib.Path('advanced-tests.jsonl')
           es=[json.loads(l) for l in p.read_text().splitlines()] if p.exists() else []
-          print({a:sum(e.get('Action')==a and bool(e.get('Test')) for e in es) for a in ['pass','fail','skip']})
+          counts={a:sum(e.get('Action')==a and bool(e.get('Test')) for e in es) for a in ['pass','fail','skip']}
+          print('TEST COUNTS',counts)
+          pathlib.Path('advanced-counts.json').write_text(json.dumps(counts))
           p=pathlib.Path('advanced-evidence/gateway-turns.jsonl')
           for line in p.read_text().splitlines() if p.exists() else []:
               item=json.loads(line)
-              if item['model']=='advanced-parallel':print('SUBAGENT FIXTURE',json.dumps(item))
+              if item['model']=='advanced-parallel':
+                  item.pop('tool_schemas',None);print('SUBAGENT FIXTURE',json.dumps(item))
           PY
       - uses: actions/upload-artifact@v4
         if: always()
@@ -90,5 +99,6 @@ jobs:
           path: |
             advanced-evidence/
             advanced-source.txt
+            advanced-counts.json
             advanced-tests.jsonl
           retention-days: 3
