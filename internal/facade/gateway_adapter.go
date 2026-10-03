@@ -23,7 +23,7 @@ func NewGatewayEngine(cfg *config.Config, runner *Runner) gateway.Engine {
 
 func (g *gatewayEngine) Run(ctx context.Context, q *gateway.Request, accepted func() error, emit func(gateway.Delta) error) (*gateway.Result, error) {
 	model, effort := q.Model, q.Effort
-	if mapping, ok := g.cfg.Facade.Models[model]; ok {
+	if mapping, ok := g.cfg.Facade.Models[model]; ok && q.ResolvedModel == "" {
 		if mapping.Model != "" {
 			model = mapping.Model
 		}
@@ -31,8 +31,11 @@ func (g *gatewayEngine) Run(ctx context.Context, q *gateway.Request, accepted fu
 			effort = mapping.ReasoningEffort
 		}
 	}
+	if q.ResolvedModel != "" {
+		model = q.ResolvedModel
+	}
 	input := gatewayInput(q)
-	run := &RunRequest{Input: input, Model: model, Effort: effort, API: "gateway", Isolated: true, Extra: q.NativeCacheFields()}
+	run := &RunRequest{AllowedAccounts: append([]string(nil), q.AllowedAccounts...), Input: input, Model: model, Effort: effort, API: "gateway", Isolated: true, Extra: q.NativeCacheFields()}
 	if q.CacheAffinity {
 		run.StickyKey = q.ScopedCacheKey
 	}
@@ -64,6 +67,9 @@ func (g *gatewayEngine) Run(ctx context.Context, q *gateway.Request, accepted fu
 		return nil, errors.New("upstream returned no result")
 	}
 	out := &gateway.Result{Text: result.Text}
+	if q.ReasoningSummary != "" && len(result.Reasoning) <= 1<<20 {
+		out.ReasoningSummary = result.Reasoning
+	}
 	if result.Usage != nil && !result.UsageEstimated {
 		u := result.Usage
 		if u.Invalid {

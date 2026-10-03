@@ -27,8 +27,9 @@ var ErrClientGone = errors.New("客户端已断开")
 
 // RunRequest 是一次推理请求的中间表示（与具体对外 API 形态无关）。
 type RunRequest struct {
-	Isolated   bool
-	OnAccepted func(context.Context) error
+	AllowedAccounts []string
+	Isolated        bool
+	OnAccepted      func(context.Context) error
 	// Input 是上游要的 input 数组。
 	//
 	// 由各 API 适配层把 messages / input 翻译成这种条目形态：
@@ -325,6 +326,9 @@ func (r *Runner) runLeased(ctx context.Context, acct *account.Account, req *RunR
 
 // acquire 选账号。
 func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, error) {
+	if req.AllowedAccounts != nil {
+		return r.acquireCatalog(ctx, req)
+	}
 	if req.AccountID != "" {
 		if a := r.pool.Get(req.AccountID); a != nil {
 			if a.Acquire(time.Now()) {

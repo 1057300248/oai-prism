@@ -214,21 +214,35 @@ func (s *stream) finish(result *Result, usage *Usage) (map[string]any, error) {
 			}
 		}
 	}
+	if item := reasoningOutput(s.q, result, "rs_"+uuid.NewString()); item != nil && s.responses {
+		idx := len(output)
+		output = append(output, item)
+		if err := s.event("response.output_item.added", map[string]any{"output_index": idx, "item": item}); err != nil {
+			return nil, err
+		}
+		if err := s.event("response.output_item.done", map[string]any{"output_index": idx, "item": item}); err != nil {
+			return nil, err
+		}
+	}
 	for index, call := range result.Calls {
 		item := callJSON(call)
 		outIndex := len(output)
 		output = append(output, item)
 		if s.responses {
 			added := callJSON(call)
-			added["arguments"] = ""
+			field, eventPrefix, value := "arguments", "response.function_call_arguments", call.Arguments
+			if call.Type == "custom_tool_call" {
+				field, eventPrefix, value = "input", "response.custom_tool_call_input", call.Input
+			}
+			added[field] = ""
 			added["status"] = "in_progress"
 			if err := s.event("response.output_item.added", map[string]any{"output_index": outIndex, "item": added}); err != nil {
 				return nil, err
 			}
-			if err := s.event("response.function_call_arguments.delta", map[string]any{"item_id": call.ID, "output_index": outIndex, "delta": call.Arguments}); err != nil {
+			if err := s.event(eventPrefix+".delta", map[string]any{"item_id": call.ID, "output_index": outIndex, "delta": value}); err != nil {
 				return nil, err
 			}
-			if err := s.event("response.function_call_arguments.done", map[string]any{"item_id": call.ID, "output_index": outIndex, "name": call.Name, "arguments": call.Arguments}); err != nil {
+			if err := s.event(eventPrefix+".done", map[string]any{"item_id": call.ID, "output_index": outIndex, "name": call.Name, field: value}); err != nil {
 				return nil, err
 			}
 			if err := s.event("response.output_item.done", map[string]any{"output_index": outIndex, "item": item}); err != nil {
@@ -300,12 +314,15 @@ func (s *stream) fail(err error) error {
 	return nil // No [DONE] or finish_reason=stop after failure.
 }
 func callJSON(call Item) map[string]any {
-	return map[string]any{"id": call.ID, "type": "function_call", "status": "completed", "call_id": call.CallID, "name": call.Name, "arguments": call.Arguments}
+	return toolCallJSON(call)
 }
 func outputJSON(result *Result) []any {
 	output := []any{}
 	if result.Text != "" || len(result.Calls) == 0 {
 		output = append(output, messageJSON("msg_"+uuid.NewString(), result.Text, "completed"))
+	}
+	if result.ReasoningSummary != "" {
+		output = append(output, map[string]any{"id": "rs_" + uuid.NewString(), "type": "reasoning", "summary": []any{map[string]any{"type": "summary_text", "text": result.ReasoningSummary}}})
 	}
 	for _, call := range result.Calls {
 		output = append(output, callJSON(call))
@@ -335,16 +352,8 @@ func responseJSON(q *Request, id string, created int64, status string, output []
 	if status == "completed" {
 		completed = time.Now().Unix()
 	}
-	tools := []any{}
-	for _, t := range q.Tools {
-		var parameters any
-		_ = json.Unmarshal(t.Parameters, &parameters)
-		tools = append(tools, map[string]any{"type": "function", "name": t.Name, "description": t.Description, "parameters": parameters, "strict": t.Strict})
-	}
-	var choice any = q.ToolChoice
-	if choice != "auto" && choice != "none" && choice != "required" {
-		choice = map[string]any{"type": "function", "name": q.ToolChoice}
-	}
+	tools := toolDefinitions(q)
+	choice := selectedToolJSON(q)
 	format := map[string]any{"type": q.Format}
 	if q.Format == "json_schema" {
 		format["name"] = q.SchemaName

@@ -18,9 +18,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/oai-prism/oaiprism/internal/catalog"
 )
 
 type Handler struct {
+	catalog   *catalog.Registry
 	summaries *summaryCache
 	options   Options
 	engine    Engine
@@ -60,9 +62,14 @@ func New(o Options, engine Engine) (*Handler, error) {
 	if err != nil {
 		return nil, err
 	}
+	h.catalog, err = catalog.New(o.Catalog)
+	if err != nil {
+		_ = h.store.Close()
+		return nil, err
+	}
 	return h, nil
 }
-func (h *Handler) Close() error { h.summaries.clear(); return h.store.Close() }
+func (h *Handler) Close() error { h.catalog.Close(); h.summaries.clear(); return h.store.Close() }
 func (h *Handler) owner(r *http.Request) (string, error) {
 	key := ""
 	auths := 0
@@ -123,6 +130,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, nil, err)
 		return
 	}
+	if h.serveCatalog(w, r) {
+		return
+	}
 	path := r.URL.Path
 	switch {
 	case path == "/v1/models" || path == "/models":
@@ -158,7 +168,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.method(w, "GET")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "context": h.contextCapabilities(), "prompt_cache": h.cacheCapabilities(), "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
+		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "codex_tools": h.options.CodexTools, "codex_client_target": "0.160.0", "model_discovery": map[string]any{"enabled": len(h.options.Catalog.Sources) > 0, "evidence": "declared_not_live_verified", "auto_publish": false}, "context": h.contextCapabilities(), "prompt_cache": h.cacheCapabilities(), "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
 		return
 	case path == "/v1/responses/compact" || path == "/responses/compact":
 		if r.Method != "POST" {
@@ -315,7 +325,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		h.fail(w, r, nil, err)
 		return
 	}
-	q, err := Parse(body, responses, h.options)
+	q, err := h.parseRequest(body, responses)
 	if err != nil {
 		h.fail(w, r, nil, err)
 		return
@@ -427,7 +437,9 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 	for i := range result.Calls {
 		result.Calls[i].ID = "fc_" + uuid.NewString()
 		result.Calls[i].CallID = "call_" + uuid.NewString()
-		result.Calls[i].Type = "function_call"
+		if result.Calls[i].Type == "" {
+			result.Calls[i].Type = "function_call"
+		}
 	}
 	history := append([]Item(nil), q.Items...)
 	if result.Text != "" || len(result.Calls) == 0 {

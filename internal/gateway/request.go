@@ -77,14 +77,14 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	}
 	allowed := "model stream store metadata user safety_identifier prompt_cache_key prompt_cache_retention prompt_cache_options tools tool_choice parallel_tool_calls"
 	if responses {
-		allowed += " input instructions previous_response_id reasoning text max_output_tokens background truncation include context_management"
+		allowed += " input instructions previous_response_id reasoning text max_output_tokens background truncation include context_management client_metadata"
 	} else {
 		allowed += " messages stream_options reasoning_effort response_format max_tokens max_completion_tokens stop n logprobs"
 	}
 	if err = keys(m, allowed); err != nil {
 		return nil, err
 	}
-	q := &Request{Format: "text", ToolChoice: "auto", Parallel: true, Store: responses && o.ResponseStore, Metadata: map[string]string{}}
+	q := &Request{CodexTools: o.CodexTools, Format: "text", ToolChoice: "auto", Parallel: true, Store: responses && o.ResponseStore, Metadata: map[string]string{}}
 	for k, raw := range m {
 		switch k {
 		case "model":
@@ -119,7 +119,9 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 				}
 				if err == nil {
 					if v, ok := reason["summary"]; ok && !null(v) {
-						err = unsupported("reasoning.summary")
+						if !o.CodexTools {
+							err = unsupported("reasoning.summary")
+						}
 					}
 				}
 			}
@@ -156,8 +158,10 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 		case "include":
 			var values []string
 			err = scalar(raw, &values, k)
-			if len(values) > 0 {
-				err = unsupported(k)
+			for _, value := range values {
+				if !o.CodexTools || value != "reasoning.encrypted_content" {
+					err = unsupported(k)
+				}
 			}
 		case "truncation":
 			var value string
@@ -206,39 +210,10 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 			}
 		case "tools":
 			if !null(raw) {
-				q.Tools, err = parseTools(raw, responses)
+				q.Tools, err = parseTools(raw, responses, o.CodexTools)
 			}
 		case "tool_choice":
-			var choice string
-			if json.Unmarshal(raw, &choice) == nil {
-				if choice != "none" && choice != "auto" && choice != "required" {
-					err = bad(k, "Invalid tool choice.")
-				} else {
-					q.ToolChoice = choice
-				}
-			} else {
-				var tm map[string]json.RawMessage
-				tm, err = Object(raw)
-				if err == nil {
-					if responses {
-						err = keys(tm, "type name")
-					} else {
-						err = keys(tm, "type function")
-					}
-				}
-				if err == nil && string(tm["type"]) != `"function"` {
-					err = unsupported(k)
-				}
-				if err == nil && !responses {
-					tm, err = Object(tm["function"])
-					if err == nil {
-						err = keys(tm, "name")
-					}
-				}
-				if err == nil {
-					err = scalar(tm["name"], &q.ToolChoice, k)
-				}
-			}
+			q.ToolChoice, err = parseToolChoice(raw, responses, o.CodexTools)
 		case "text", "response_format":
 			var fm map[string]json.RawMessage
 			fm, err = Object(raw)
@@ -295,12 +270,8 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	if _, ok := o.Models[q.Model]; !ok {
 		return nil, &APIError{Status: 404, Code: "model_not_found", Param: "model", Message: "This model is not configured on the gateway."}
 	}
-	if q.Effort != "" {
-		switch q.Effort {
-		case "none", "minimal", "low", "medium", "high", "xhigh":
-		default:
-			return nil, unsupported("reasoning.effort")
-		}
+	if !validEffort(q.Model, q.Effort, o) {
+		return nil, unsupported("reasoning.effort")
 	}
 	if q.Store && (!responses || !o.ResponseStore) {
 		return nil, unsupported("store")
@@ -317,13 +288,13 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	if len(q.Tools) > 0 && !o.PromptTools {
 		return nil, unsupported("tools")
 	}
-	if q.Format != "text" && len(q.Tools) > 0 {
+	if q.Format != "text" && len(q.Tools) > 0 && !q.CodexTools {
 		return nil, bad("tools", "Tool selection and structured final output cannot be combined in this transport.")
 	}
 	if q.ToolChoice != "auto" && q.ToolChoice != "none" {
 		found := q.ToolChoice == "required" && len(q.Tools) > 0
 		for _, t := range q.Tools {
-			found = found || t.Name == q.ToolChoice
+			found = found || t.key() == q.ToolChoice
 		}
 		if !found {
 			return nil, bad("tool_choice", "Tool choice must reference a declared function.")
@@ -345,13 +316,19 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := parseCodexPreferences(m, q, o); err != nil {
+		return nil, err
+	}
 	if err := parseContextCache(m, q, o, responses); err != nil {
 		return nil, err
 	}
 	return q, nil
 }
 
-func parseTools(raw []byte, responses bool) ([]Tool, error) {
+func parseTools(raw []byte, responses bool, codex bool) ([]Tool, error) {
+	if responses {
+		return parseResponseTools(raw, codex)
+	}
 	var list []json.RawMessage
 	if err := scalar(raw, &list, "tools"); err != nil {
 		return nil, err
@@ -413,6 +390,9 @@ func parseTools(raw []byte, responses bool) ([]Tool, error) {
 }
 
 func parseItems(raw []byte, responses bool, o Options) ([]Item, error) {
+	if responses && o.CodexTools {
+		return parseCodexItems(raw, o)
+	}
 	var list []json.RawMessage
 	if err := scalar(raw, &list, "input"); err != nil {
 		return nil, err
@@ -677,26 +657,4 @@ func validateImage(url string) error {
 
 // ValidateHistory runs after previous_response_id expansion, so function outputs
 // cannot fabricate call identities or overwrite completed calls.
-func ValidateHistory(items []Item) error {
-	pending := map[string]bool{}
-	seen := map[string]bool{}
-	for _, item := range items {
-		switch item.Type {
-		case "function_call":
-			if item.CallID == "" || len(item.CallID) > 128 || seen[item.CallID] {
-				return bad("input", "Duplicate or invalid function call ID.")
-			}
-			seen[item.CallID] = true
-			pending[item.CallID] = true
-		case "function_call_output":
-			if !pending[item.CallID] {
-				return bad("input", "Function output must reference a preceding unresolved call.")
-			}
-			delete(pending, item.CallID)
-		}
-	}
-	if len(pending) > 0 {
-		return bad("input", "Provide an output for every preceding function call.")
-	}
-	return nil
-}
+func ValidateHistory(items []Item) error { return validateCallHistory(items) }

@@ -16,18 +16,29 @@ import (
 // Contract validates completed outputs. Prompt adaptation is not constrained
 // decoding and never runs functions on the gateway server.
 type Contract struct {
+	custom  map[string]Tool
 	schemas map[string]*jsonschema.Schema
 	output  *jsonschema.Schema
 }
 
 func Prepare(q *Request) (*Contract, error) {
-	c := &Contract{schemas: map[string]*jsonschema.Schema{}}
+	c := &Contract{schemas: map[string]*jsonschema.Schema{}, custom: map[string]Tool{}}
 	for _, t := range q.Tools {
+		if t.custom() {
+			if !q.CodexTools {
+				return nil, unsupported("tools.custom")
+			}
+			if err := validateCustomFormat(t); err != nil {
+				return nil, err
+			}
+			c.custom[t.key()] = t
+			continue
+		}
 		schema, err := compileSchema(t.Parameters)
 		if err != nil {
 			return nil, bad("tools.parameters", "Invalid, oversized, or externally-referencing JSON schema.")
 		}
-		c.schemas[t.Name] = schema
+		c.schemas[t.key()] = schema
 	}
 	if q.Format == "json_schema" {
 		schema, err := compileSchema(q.Schema)
@@ -97,6 +108,9 @@ func compileSchema(raw []byte) (*jsonschema.Schema, error) {
 // PromptInstructions describes an explicitly emulated interface. It never
 // represents the caller's history or tool outputs as higher-priority instructions.
 func PromptInstructions(q *Request) string {
+	if q.CodexTools && len(q.Tools) > 0 {
+		return codexToolPrompt(q)
+	}
 	if len(q.Tools) > 0 {
 		definitions, _ := json.Marshal(q.Tools)
 		return "\n\nThe caller's functions are executed ONLY by the caller, never in your workspace. Do not use internal shell/file tools to emulate them. Return exactly one JSON object with no markdown: {\"text\":\"answer or empty string\",\"tool_calls\":[{\"name\":\"declared function name\",\"arguments\":{}}]}. Arguments must satisfy the declared JSON schema. When no function is needed return an empty tool_calls array. Selection rule: " + q.ToolChoice + fmt.Sprintf(". Parallel calls allowed: %t. Declared functions: %s", q.Parallel, definitions)
@@ -118,38 +132,9 @@ func (c *Contract) Finalize(q *Request, result *Result) error {
 		return errors.New("upstream output exceeds configured bound")
 	}
 	if len(q.Tools) > 0 && len(result.Calls) == 0 {
-		// Strict envelope: ordinary prose is NOT relabelled as a successful tool call.
-		fields, err := Object([]byte(strings.TrimSpace(result.Text)))
-		if err != nil {
-			return errors.New("upstream tool adapter did not return its declared envelope")
+		if err := decodeToolEnvelope(q, result); err != nil {
+			return err
 		}
-		if keys(fields, "text tool_calls") != nil {
-			return errors.New("invalid tool envelope properties")
-		}
-		var text string
-		var calls []json.RawMessage
-		if scalar(fields["text"], &text, "") != nil || scalar(fields["tool_calls"], &calls, "") != nil {
-			return errors.New("invalid tool envelope")
-		}
-		if len(calls) > 128 {
-			return errors.New("too many tool calls")
-		}
-		for _, raw := range calls {
-			m, err := Object(raw)
-			if err != nil || keys(m, "name arguments") != nil {
-				return errors.New("invalid tool call")
-			}
-			var name string
-			if scalar(m["name"], &name, "") != nil {
-				return errors.New("missing function name")
-			}
-			arguments := m["arguments"]
-			if len(arguments) == 0 || null(arguments) {
-				return errors.New("missing function arguments")
-			}
-			result.Calls = append(result.Calls, Item{Type: "function_call", Name: name, Arguments: string(arguments)})
-		}
-		result.Text = text
 	}
 	if len(result.Calls) > 128 {
 		return errors.New("too many tool calls")
@@ -164,11 +149,26 @@ func (c *Contract) Finalize(q *Request, result *Result) error {
 		return errors.New("upstream violated parallel_tool_calls=false")
 	}
 	for _, call := range result.Calls {
-		schema, ok := c.schemas[call.Name]
+		if t, ok := c.custom[call.callKey()]; ok {
+			if call.Type != "custom_tool_call" {
+				return errors.New("custom tool requires custom call type")
+			}
+			if q.ToolChoice != "auto" && q.ToolChoice != "required" && q.ToolChoice != call.callKey() {
+				return errors.New("upstream violated named tool selection")
+			}
+			if err := validateCustomInput(t, call.Input); err != nil {
+				return err
+			}
+			continue
+		}
+		if call.Type != "" && call.Type != "function_call" {
+			return errors.New("function requires function_call type")
+		}
+		schema, ok := c.schemas[call.callKey()]
 		if !ok {
 			return errors.New("upstream returned an undeclared function")
 		}
-		if q.ToolChoice != "auto" && q.ToolChoice != "required" && q.ToolChoice != call.Name {
+		if q.ToolChoice != "auto" && q.ToolChoice != "required" && q.ToolChoice != call.callKey() {
 			return errors.New("upstream violated named tool selection")
 		}
 		arguments, err := jsonschema.UnmarshalJSON(strings.NewReader(call.Arguments))
@@ -185,7 +185,7 @@ func (c *Contract) Finalize(q *Request, result *Result) error {
 	if result.Incomplete {
 		return nil
 	}
-	if q.Format != "text" {
+	if q.Format != "text" && len(result.Calls) == 0 {
 		value, err := jsonschema.UnmarshalJSON(strings.NewReader(result.Text))
 		if err != nil {
 			return errors.New("upstream returned invalid structured JSON")
@@ -208,7 +208,7 @@ func (c *Contract) Finalize(q *Request, result *Result) error {
 		if len(result.Calls) > 0 {
 			total := 0
 			for _, call := range result.Calls {
-				n, err := CountTokens(call.Name + call.Arguments)
+				n, err := CountTokens(call.callKey() + call.Arguments + call.Input)
 				if err != nil {
 					return err
 				}
@@ -283,7 +283,7 @@ func normalizeGenerationUsage(q *Request, result *Result, policy string) (*Usage
 		}
 		outText := result.Text
 		for _, call := range result.Calls {
-			outText += call.Name + call.Arguments
+			outText += call.callKey() + call.Arguments + call.Input
 		}
 		out, err := CountTokens(outText)
 		if err != nil {

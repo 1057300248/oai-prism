@@ -68,7 +68,7 @@ func (h *Handler) contextEndpoint(w http.ResponseWriter, r *http.Request, owner 
 	}
 	fields["store"] = json.RawMessage("false")
 	body, _ = json.Marshal(fields)
-	q, err := Parse(body, true, h.options)
+	q, err := h.parseRequest(body, true)
 	if err != nil {
 		h.fail(w, r, nil, err)
 		return

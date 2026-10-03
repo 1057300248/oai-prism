@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/oai-prism/oaiprism/internal/catalog"
 	"net"
 	"net/http"
 	"strings"
@@ -20,26 +21,35 @@ const MaxItems = 1024
 
 // Options are operator-owned configuration, never request overrides.
 type Options struct {
-	Context          ContextPolicy     `yaml:"context"`
-	Cache            PromptCachePolicy `yaml:"prompt_cache"`
-	Enabled          bool              `yaml:"enabled"`
-	APIKeys          []string          `yaml:"-"`
-	Models           map[string]string `yaml:"-"`
-	TenantHeader     string            `yaml:"tenant_header"`
-	TrustedPeers     []string          `yaml:"trusted_peers"`
-	ResponseStore    bool              `yaml:"response_store"`
-	StorePath        string            `yaml:"store_path"`
-	StoreKeyEnv      string            `yaml:"store_key_env"`
-	UsagePolicy      string            `yaml:"usage_policy"`
-	PromptTools      bool              `yaml:"prompt_tools"`
-	StructuredOutput bool              `yaml:"structured_output"`
-	InlineImages     bool              `yaml:"inline_images"`
-	LocalOutputLimit bool              `yaml:"local_output_limit"`
-	Timeout          time.Duration     `yaml:"timeout"`
-	MaxConcurrent    int               `yaml:"max_concurrent"`
+	Catalog          catalog.Options     `yaml:"catalog"`
+	CatalogEfforts   map[string][]string `yaml:"-"`
+	CodexTools       bool                `yaml:"codex_tools"`
+	Context          ContextPolicy       `yaml:"context"`
+	Cache            PromptCachePolicy   `yaml:"prompt_cache"`
+	Enabled          bool                `yaml:"enabled"`
+	APIKeys          []string            `yaml:"-"`
+	Models           map[string]string   `yaml:"-"`
+	TenantHeader     string              `yaml:"tenant_header"`
+	TrustedPeers     []string            `yaml:"trusted_peers"`
+	ResponseStore    bool                `yaml:"response_store"`
+	StorePath        string              `yaml:"store_path"`
+	StoreKeyEnv      string              `yaml:"store_key_env"`
+	UsagePolicy      string              `yaml:"usage_policy"`
+	PromptTools      bool                `yaml:"prompt_tools"`
+	StructuredOutput bool                `yaml:"structured_output"`
+	InlineImages     bool                `yaml:"inline_images"`
+	LocalOutputLimit bool                `yaml:"local_output_limit"`
+	Timeout          time.Duration       `yaml:"timeout"`
+	MaxConcurrent    int                 `yaml:"max_concurrent"`
 }
 
 func (o Options) Validate() error {
+	if err := o.Catalog.Validate(); err != nil {
+		return err
+	}
+	if o.CodexTools && !o.PromptTools {
+		return errors.New("codex_tools requires prompt_tools")
+	}
 	if err := o.validateContextCache(); err != nil {
 		return err
 	}
@@ -93,6 +103,9 @@ type Content struct {
 	Detail   string `json:"detail,omitempty"`
 }
 type Item struct {
+	Namespace string    `json:"namespace,omitempty"`
+	Input     string    `json:"input,omitempty"`
+	Phase     string    `json:"phase,omitempty"`
 	Type      string    `json:"type"`
 	ID        string    `json:"id,omitempty"`
 	Role      string    `json:"role,omitempty"`
@@ -103,12 +116,22 @@ type Item struct {
 	Output    string    `json:"output,omitempty"`
 }
 type Tool struct {
-	Name        string          `json:"name"`
-	Description string          `json:"description,omitempty"`
-	Parameters  json.RawMessage `json:"parameters"`
-	Strict      bool            `json:"strict"`
+	Type                 string          `json:"type,omitempty"`
+	Namespace            string          `json:"namespace,omitempty"`
+	NamespaceDescription string          `json:"namespace_description,omitempty"`
+	Format               json.RawMessage `json:"format,omitempty"`
+	Name                 string          `json:"name"`
+	Description          string          `json:"description,omitempty"`
+	Parameters           json.RawMessage `json:"parameters"`
+	Strict               bool            `json:"strict"`
 }
 type Request struct {
+	CodexTools           bool
+	ReasoningSummary     string
+	ClientMetadata       map[string]string
+	ResolvedModel        string
+	AllowedAccounts      []string
+	DeclaredWindow       int
 	PromptCacheKey       string
 	PromptCacheRetention string
 	PromptCacheOptions   map[string]json.RawMessage
@@ -148,11 +171,12 @@ type Usage struct {
 	Source     string // upstream | estimated
 }
 type Result struct {
-	Text       string
-	Calls      []Item
-	Usage      *Usage
-	Incomplete bool
-	Refusal    string
+	ReasoningSummary string
+	Text             string
+	Calls            []Item
+	Usage            *Usage
+	Incomplete       bool
+	Refusal          string
 }
 type Delta struct {
 	Text  string

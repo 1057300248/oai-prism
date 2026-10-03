@@ -72,6 +72,14 @@ func (c ContextPolicy) window(model string) int {
 	}
 	return c.WindowTokens
 }
+func (c ContextPolicy) effectiveWindow(q *Request) int {
+	w := c.window(q.Model)
+	if q.DeclaredWindow > 0 && (w == 0 || q.DeclaredWindow < w) {
+		w = q.DeclaredWindow
+	}
+	return w
+}
+
 func (c ContextPolicy) summaryLimit() int {
 	if c.SummaryTokens > 0 {
 		return c.SummaryTokens
@@ -108,7 +116,8 @@ func (c ContextPolicy) budget(q *Request) (int, error) {
 	if margin == 0 {
 		margin = 1024
 	}
-	budget := c.window(q.Model) - reserve - margin
+	window := c.effectiveWindow(q)
+	budget := window - reserve - margin
 	if budget < 128 {
 		return 0, contextTooLarge("The output reserve and safety margin leave no usable input budget.")
 	}
@@ -231,12 +240,12 @@ func CanonicalItems(items []Item) []Item {
 		out[i] = item
 		out[i].ID = ""
 		out[i].Content = append([]Content(nil), item.Content...)
-		if item.Type == "function_call" {
+		if isToolCall(item.Type) {
 			label := "call_" + strconv.Itoa(len(calls)+1)
 			calls[item.CallID] = label
 			out[i].CallID = label
 		}
-		if item.Type == "function_call_output" {
+		if isToolOutput(item.Type) {
 			if label, ok := calls[item.CallID]; ok {
 				out[i].CallID = label
 			}
@@ -251,7 +260,7 @@ type RenderMessage struct {
 	Content []Content `json:"content"`
 }
 
-const renderVersion = "gateway-transcript-v2"
+const renderVersion = "gateway-transcript-v3"
 
 // RenderInput is shared by the actual upstream adapter, token budgets and cache
 // fingerprints. JSON-lines preserve earlier prefixes as turns are appended.
@@ -307,6 +316,9 @@ func RenderedTokens(q *Request) (int, error) {
 
 func (h *Handler) bindPromptCache(q *Request, owner string) {
 	route := h.options.Models[q.Model]
+	if q.ResolvedModel != "" {
+		route = q.ResolvedModel
+	}
 	pinned := []Item{}
 	for _, item := range q.Items {
 		if item.Role == "system" || item.Role == "developer" {
