@@ -2,11 +2,9 @@ package gateway
 
 import (
 	"bytes"
-	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"regexp"
 	"strings"
 )
@@ -560,6 +558,13 @@ func parseContent(raw []byte, role string, o Options) ([]Content, error) {
 		if err = scalar(m["type"], &typ, "content.type"); err != nil {
 			return nil, err
 		}
+		if part, handled, e := parseAttachmentBlock(m, role, o); handled {
+			if e != nil {
+				return nil, e
+			}
+			out = append(out, part)
+			continue
+		}
 		switch typ {
 		case "text", "input_text", "output_text":
 			if err = keys(m, "type text annotations"); err != nil {
@@ -626,34 +631,7 @@ func parseContent(raw []byte, role string, o Options) ([]Content, error) {
 	}
 	return out, nil
 }
-func validateImage(url string) error {
-	header, data, ok := strings.Cut(url, ",")
-	if !ok {
-		return bad("image_url", "Use an inline base64 PNG/JPEG/GIF/WebP image. Remote URLs are disabled to prevent SSRF.")
-	}
-	mime, ok := strings.CutPrefix(header, "data:")
-	if !ok {
-		return unsupported("image_url")
-	}
-	mime, ok = strings.CutSuffix(mime, ";base64")
-	if !ok {
-		return unsupported("image_url")
-	}
-	if mime != "image/png" && mime != "image/jpeg" && mime != "image/gif" && mime != "image/webp" {
-		return unsupported("image_url")
-	}
-	if len(data) > 8<<20 {
-		return bad("image_url", "Image exceeds 6 MiB decoded.")
-	}
-	decoded, err := base64.StdEncoding.Strict().DecodeString(data)
-	if err != nil || len(decoded) == 0 || len(decoded) > 6<<20 {
-		return bad("image_url", "Invalid image data.")
-	}
-	if http.DetectContentType(decoded) != mime {
-		return bad("image_url", "Image content does not match its declared media type.")
-	}
-	return nil
-}
+func validateImage(url string) error { _, _, err := imageData(url); return err }
 
 // ValidateHistory runs after previous_response_id expansion, so function outputs
 // cannot fabricate call identities or overwrite completed calls.

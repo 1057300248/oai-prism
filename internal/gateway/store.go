@@ -24,6 +24,7 @@ const storeMaxBytes = 64 << 20
 const storeEntryLimit = 20 << 20
 
 type Snapshot struct {
+	FileIDs    []string        `json:"file_ids,omitempty"`
 	InputItems []Item          `json:"input_items"`
 	Response   json.RawMessage `json:"response"`
 	Items      []Item          `json:"items"`

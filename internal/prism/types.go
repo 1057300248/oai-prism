@@ -183,8 +183,10 @@ type InputItem struct {
 // 少了它们，图像块的 URL 会无处安放，最终发一个空的 input_image 给上游：
 // 上游不报错，模型只是"看不见图"。这类静默失效极难定位。
 type InputContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	// Gateway-only transient data; must be uploaded before encoding the start request.
+	GatewayFileData string `json:"-"`
+	Type            string `json:"type"`
+	Text            string `json:"text,omitempty"`
 	// ImageURL 是 input_image 的图片地址。
 	// 上游字段名就是 image_url（输入块也用它，不是 output 那套）。
 	ImageURL string `json:"image_url,omitempty"`

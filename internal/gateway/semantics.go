@@ -273,6 +273,9 @@ func LimitText(text string, limit int) (string, bool, error) {
 }
 func normalizeGenerationUsage(q *Request, result *Result, policy string) (*Usage, error) {
 	u := result.Usage
+	if q.HasMedia && (u == nil || u.Source != "upstream") {
+		return nil, errors.New("binary-media billing requires authoritative upstream usage")
+	}
 	if u == nil || u.Source != "upstream" {
 		if policy == "upstream_only" {
 			return nil, errors.New("authoritative upstream usage unavailable")

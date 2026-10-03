@@ -84,6 +84,11 @@ func (h *Handler) contextEndpoint(w http.ResponseWriter, r *http.Request, owner 
 			return
 		}
 		q.Items = append(snapshot.Items, q.Items...)
+		q.FileIDs = append([]string(nil), snapshot.FileIDs...)
+	}
+	if err := h.resolveAttachments(ctx, q, owner); err != nil {
+		h.fail(w, r, nil, err)
+		return
 	}
 	raw, _ := json.Marshal(q.Items)
 	if len(raw) > MaxHistory || len(q.Items) > MaxItems {
@@ -101,7 +106,7 @@ func (h *Handler) contextEndpoint(w http.ResponseWriter, r *http.Request, owner 
 			h.fail(w, r, nil, e)
 			return
 		}
-		writeJSON(w, 200, map[string]any{"object": "response.input_tokens", "input_tokens": n, "x_oaiprism_source": "estimated", "x_oaiprism_tokenizer": "o200k_base_rendered"})
+		writeJSON(w, 200, map[string]any{"object": "response.input_tokens", "input_tokens": n, "x_oaiprism_source": "estimated", "x_oaiprism_tokenizer": "o200k_base_rendered", "x_oaiprism_media_budget": q.HasMedia})
 		return
 	}
 	if err = h.prepareContext(ctx, q, owner, true, nil); err != nil {

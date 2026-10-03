@@ -18,10 +18,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/oai-prism/oaiprism/internal/attachment"
 	"github.com/oai-prism/oaiprism/internal/catalog"
 )
 
 type Handler struct {
+	files     *attachment.Store
 	catalog   *catalog.Registry
 	summaries *summaryCache
 	options   Options
@@ -67,9 +69,24 @@ func New(o Options, engine Engine) (*Handler, error) {
 		_ = h.store.Close()
 		return nil, err
 	}
+	if o.Files.Enabled {
+		h.files, err = attachment.New(o.Files)
+		if err != nil {
+			h.catalog.Close()
+			_ = h.store.Close()
+			return nil, err
+		}
+	}
 	return h, nil
 }
-func (h *Handler) Close() error { h.catalog.Close(); h.summaries.clear(); return h.store.Close() }
+func (h *Handler) Close() error {
+	h.catalog.Close()
+	h.summaries.clear()
+	if h.files != nil {
+		_ = h.files.Close()
+	}
+	return h.store.Close()
+}
 func (h *Handler) owner(r *http.Request) (string, error) {
 	key := ""
 	auths := 0
@@ -130,6 +147,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		h.fail(w, r, nil, err)
 		return
 	}
+	if h.serveFiles(w, r, owner) {
+		return
+	}
 	if h.serveCatalog(w, r) {
 		return
 	}
@@ -168,7 +188,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			h.method(w, "GET")
 			return
 		}
-		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "codex_tools": h.options.CodexTools, "codex_client_target": "0.160.0", "model_discovery": map[string]any{"enabled": len(h.options.Catalog.Sources) > 0, "evidence": "declared_not_live_verified", "auto_publish": false}, "context": h.contextCapabilities(), "prompt_cache": h.cacheCapabilities(), "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
+		writeJSON(w, 200, map[string]any{"object": "gateway.capabilities", "attachments": h.attachmentCapabilities(), "codex_tools": h.options.CodexTools, "codex_client_target": "0.160.0", "model_discovery": map[string]any{"enabled": len(h.options.Catalog.Sources) > 0, "evidence": "declared_not_live_verified", "auto_publish": false}, "context": h.contextCapabilities(), "prompt_cache": h.cacheCapabilities(), "chat_completions": true, "responses": true, "tools": map[string]any{"enabled": h.options.PromptTools, "implementation": "prompt_adaptation", "server_execution": false}, "structured_output": map[string]any{"enabled": h.options.StructuredOutput, "implementation": "prompt_then_validate"}, "inline_images": h.options.InlineImages, "remote_images": false, "response_store": h.options.ResponseStore, "response_store_ttl_seconds": int(storeTTL.Seconds()), "local_output_limit": h.options.LocalOutputLimit, "tokenizer": "o200k_base_local_estimate", "native_sampling_parameters": false})
 		return
 	case path == "/v1/responses/compact" || path == "/responses/compact":
 		if r.Method != "POST" {
@@ -341,6 +361,11 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 			return
 		}
 		q.Items = append(snapshot.Items, q.Items...)
+		q.FileIDs = append([]string(nil), snapshot.FileIDs...)
+	}
+	if err := h.resolveAttachments(ctx, q, owner); err != nil {
+		h.fail(w, r, nil, err)
+		return
 	}
 	for i := range q.Items {
 		if q.Items[i].ID == "" {
@@ -454,7 +479,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		if err != nil {
 			return err
 		}
-		return h.store.Put(ctx, id, owner, Snapshot{Response: raw, Items: history, InputItems: append([]Item(nil), q.Items...)})
+		return h.store.Put(ctx, id, owner, Snapshot{Response: raw, Items: history, InputItems: append([]Item(nil), q.Items...), FileIDs: append([]string(nil), q.FileIDs...)})
 	}
 	w.Header().Set("X-Oaiprism-Usage-Source", usage.Source)
 	if s != nil {

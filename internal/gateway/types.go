@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/oai-prism/oaiprism/internal/attachment"
 	"github.com/oai-prism/oaiprism/internal/catalog"
 	"net"
 	"net/http"
@@ -21,6 +22,8 @@ const MaxItems = 1024
 
 // Options are operator-owned configuration, never request overrides.
 type Options struct {
+	Files            attachment.Options  `yaml:"files"`
+	Media            MediaPolicy         `yaml:"media"`
 	Catalog          catalog.Options     `yaml:"catalog"`
 	CatalogEfforts   map[string][]string `yaml:"-"`
 	CodexTools       bool                `yaml:"codex_tools"`
@@ -44,6 +47,18 @@ type Options struct {
 }
 
 func (o Options) Validate() error {
+	if err := o.Files.Validate(); err != nil {
+		return err
+	}
+	if err := o.Media.validate(); err != nil {
+		return err
+	}
+	if o.Files.Enabled && (o.TenantHeader == "" || len(o.TrustedPeers) == 0) {
+		return errors.New("files require a trusted tenant header and peer; shared channel keys are not user identities")
+	}
+	if o.Files.Path != "" && o.Files.Path == o.StorePath {
+		return errors.New("files and response stores must use separate database paths")
+	}
 	if err := o.Catalog.Validate(); err != nil {
 		return err
 	}
@@ -97,6 +112,9 @@ func (o Options) Validate() error {
 }
 
 type Content struct {
+	FileID   string `json:"file_id,omitempty"`
+	Filename string `json:"filename,omitempty"`
+	FileData string `json:"file_data,omitempty"`
 	Type     string `json:"type"`
 	Text     string `json:"text,omitempty"`
 	ImageURL string `json:"image_url,omitempty"`
@@ -126,6 +144,9 @@ type Tool struct {
 	Strict               bool            `json:"strict"`
 }
 type Request struct {
+	FileIDs              []string
+	HasMedia             bool
+	MediaPolicy          MediaPolicy
 	CodexTools           bool
 	ReasoningSummary     string
 	ClientMetadata       map[string]string

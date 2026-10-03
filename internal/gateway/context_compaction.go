@@ -169,6 +169,22 @@ func partitionContext(items []Item, keep int) (pinned, history []Item, cuts []in
 	if len(users) > keep {
 		protect = users[len(users)-keep]
 	}
+	// Binary evidence must remain attached, not be encoded as text for a summary.
+	// Retain its entire turn and every later turn. Compaction may then fail closed
+	// if this indivisible suffix alone exceeds the configured input budget.
+	lastUser := 0
+	for i, it := range history {
+		if it.Type == "message" && it.Role == "user" {
+			lastUser = i
+		}
+		for _, part := range it.Content {
+			if part.Type == "input_image" || part.Type == "input_file" {
+				if lastUser < protect {
+					protect = lastUser
+				}
+			}
+		}
+	}
 	for _, cut := range cuts {
 		if cut <= protect {
 			coldEnd = cut

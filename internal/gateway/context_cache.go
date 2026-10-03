@@ -260,7 +260,7 @@ type RenderMessage struct {
 	Content []Content `json:"content"`
 }
 
-const renderVersion = "gateway-transcript-v3"
+const renderVersion = "gateway-transcript-v4-media"
 
 // RenderInput is shared by the actual upstream adapter, token budgets and cache
 // fingerprints. JSON-lines preserve earlier prefixes as turns are appended.
@@ -280,9 +280,9 @@ func RenderInput(q *Request) []RenderMessage {
 			continue
 		}
 		for i, part := range item.Content {
-			if part.Type == "input_image" {
+			if part.Type == "input_image" || part.Type == "input_file" {
 				images = append(images, part)
-				item.Content[i] = Content{Type: "input_text", Text: "[inline image attached]"}
+				item.Content[i] = Content{Type: "input_text", Text: "[binary attachment " + strconv.Itoa(len(images)) + " attached: " + part.Filename + "]"}
 			}
 		}
 		raw, _ := json.Marshal(item)
@@ -298,21 +298,7 @@ func RenderInput(q *Request) []RenderMessage {
 	parts = append(parts, images...)
 	return append(out, RenderMessage{Type: "message", Role: "user", Content: parts})
 }
-func RenderedTokens(q *Request) (int, error) {
-	input := RenderInput(q)
-	for _, item := range input {
-		for _, part := range item.Content {
-			if part.Type == "input_image" {
-				return 0, unsupported("context_budget_with_images")
-			}
-		}
-	}
-	raw, err := json.Marshal(input)
-	if err != nil {
-		return 0, err
-	}
-	return CountTokens(string(raw))
-}
+func RenderedTokens(q *Request) (int, error) { return RenderedMediaTokens(q) }
 
 func (h *Handler) bindPromptCache(q *Request, owner string) {
 	route := h.options.Models[q.Model]

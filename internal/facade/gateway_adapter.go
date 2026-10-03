@@ -2,6 +2,7 @@ package facade
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"strings"
 
@@ -91,7 +92,7 @@ func gatewayInput(q *gateway.Request) []prism.InputItem {
 	for _, message := range rendered {
 		item := prism.InputItem{Type: message.Type, Role: message.Role}
 		for _, part := range message.Content {
-			item.Content = append(item.Content, prism.InputContent{Type: part.Type, Text: part.Text, ImageURL: part.ImageURL, Detail: part.Detail})
+			item.Content = append(item.Content, prism.InputContent{Type: part.Type, Text: part.Text, ImageURL: part.ImageURL, Detail: part.Detail, Filename: part.Filename, GatewayFileData: part.FileData})
 		}
 		items = append(items, item)
 	}
@@ -106,6 +107,21 @@ func preprocessGatewayImages(ctx context.Context, client *prism.Client, p prism.
 		output[i] = item
 		output[i].Content = append([]prism.InputContent(nil), item.Content...)
 		for j, part := range item.Content {
+			if part.Type == "input_file" {
+				if projectID == "" || part.GatewayFileData == "" {
+					return nil, errors.New("PDF requires an isolated project and resolved data")
+				}
+				data, err := base64.StdEncoding.Strict().DecodeString(part.GatewayFileData)
+				if err != nil || len(data) > 8<<20 || !strings.HasPrefix(string(data), "%PDF-") {
+					return nil, errors.New("invalid gateway PDF")
+				}
+				name := "gateway_pdf_" + randHex(12) + ".pdf"
+				if _, err = client.UploadFile(ctx, p, prism.FileUpload{ProjectID: projectID, Path: name, Filename: name, Data: data}); err != nil {
+					return nil, err
+				}
+				output[i].Content[j] = prism.InputContent{Type: "input_file", Filename: name, ProjectPath: name}
+				continue
+			}
 			if part.Type != "input_image" {
 				continue
 			}
