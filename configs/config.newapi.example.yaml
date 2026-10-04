@@ -2,7 +2,7 @@
 # workbench profile. It never exposes /admin, /dashboard or /prism routes.
 # Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
 # Supply your own authorized upstream credentials in the separately mounted file.
-# See CONTEXT_CACHE.md, CODEX_GATEWAY.md and FILES_MEDIA.md for feature boundaries.
+# See CONTEXT_CACHE.md, CODEX_GATEWAY.md, FILES_MEDIA.md and BRIDGE_TRANSPORT.md.
 server:
   host: 127.0.0.1
   port: 8787
@@ -69,6 +69,22 @@ facade:
     # Tested Codex 0.160.0 function/custom/namespace contract; opt in explicitly.
     # Files, shell, MCP and subprocesses still execute on the client, not here.
     codex_tools: false
+    bridge:
+      # This is gateway-to-Prism transport, not the public Files API body format.
+      upload_mode: multipart # Optional raw binary; verify actual upstream first.
+      # 0 preserves the existing limit behavior; configure measured JSON bytes.
+      # Does not disable the public request limit or permit silent multi-turn ACKs.
+      max_start_bytes: 0
+      instruction_placement: system # Optional user_relay COPY; never drops system.
+      additional_tools: false # Requires prompt_tools and codex_tools.
+      continuation:
+        # Opt-in only: requires use_sandbox, response_store and trusted tenant.
+        # One process must exclusively own these upstream accounts.
+        enabled: false
+        verified_models: []
+        ttl: 10m
+        session_header: "" # Optional per-client task label, never identity.
+        action_id: "" # Optional observed Next action ID; empty uses bounded discovery.
     catalog:
       refresh_interval: 5m
       max_age: 1h
@@ -129,9 +145,9 @@ facade:
       affinity: true
       native_models: [] # Only aliases with verified upstream cache controls.
 
-# To enable files, response storage or summary caching, the authenticated proxy
-# MUST overwrite tenant_header with a verified END-USER identity. Do not forward
-# a client-supplied value unchanged or use one static tenant for all customers.
+# To enable files, response storage, summary caching or upstream continuation,
+# the authenticated proxy MUST overwrite tenant_header with a verified END-USER
+# identity. Do not forward a client-supplied value or share one static tenant.
 # Example identity/response overrides only after establishing that contract:
 #   tenant_header: X-Verified-Tenant
 #   trusted_peers: ["127.0.0.1/32"]
