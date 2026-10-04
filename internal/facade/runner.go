@@ -15,6 +15,7 @@ import (
 	"github.com/oai-prism/oaiprism/internal/account"
 	"github.com/oai-prism/oaiprism/internal/config"
 	"github.com/oai-prism/oaiprism/internal/creds"
+	"github.com/oai-prism/oaiprism/internal/gateway"
 	"github.com/oai-prism/oaiprism/internal/metrics"
 	"github.com/oai-prism/oaiprism/internal/prism"
 )
@@ -27,9 +28,14 @@ var ErrClientGone = errors.New("客户端已断开")
 
 // RunRequest 是一次推理请求的中间表示（与具体对外 API 形态无关）。
 type RunRequest struct {
-	AllowedAccounts []string
-	Isolated        bool
-	OnAccepted      func(context.Context) error
+	GatewayStateful      bool
+	GatewayResume        *gateway.UpstreamState
+	GatewayEpoch         uint64
+	GatewayActionID      string
+	GatewayMaxStartBytes int
+	AllowedAccounts      []string
+	Isolated             bool
+	OnAccepted           func(context.Context) error
 	// Input 是上游要的 input 数组。
 	//
 	// 由各 API 适配层把 messages / input 翻译成这种条目形态：
@@ -87,6 +93,8 @@ type Delta struct {
 
 // RunResult 是一次运行的最终结果。
 type RunResult struct {
+	GatewayState   *gateway.UpstreamState
+	RunStage       string
 	UsageEstimated bool
 	Text           string
 	Reasoning      string
@@ -131,6 +139,7 @@ type RunResult struct {
 //  1. 失败是 HTTP 200 + response.status:"error"，只看状态码会误判成成功；
 //  2. turn_state 是不透明令牌，必须原样回传，不能自己构造。
 type Runner struct {
+	accountEpoch sync.Map
 	stopGC       context.CancelFunc
 	accountGates sync.Map
 	cfg          *config.Config
@@ -280,6 +289,9 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 		}
 
 		r.pool.MarkResult(lease.Account, err, retryAfter(err))
+		if req.GatewayStateful {
+			return res, err
+		}
 
 		// 已经吐过内容就不能换号重试，否则客户端会收到两段拼接的回答。
 		if res != nil && (res.Text != "" || res.Reasoning != "" || res.RequestID != "") {
@@ -318,14 +330,37 @@ func (r *Runner) runLeased(ctx context.Context, acct *account.Account, req *RunR
 		default:
 			return nil, account.ErrNoAccount
 		}
+		if err := r.fenceGatewayAccount(acct, req); err != nil {
+			return nil, err
+		}
 		r.sandboxes.Invalidate(acct.ID)
 		defer r.sandboxes.Invalidate(acct.ID)
 	}
-	return r.runOnce(ctx, acct, req, emit)
+	res, err := r.runOnce(ctx, acct, req, emit)
+	if req.Isolated && err != nil {
+		stage := "setup"
+		if res != nil && res.RunStage != "" {
+			stage = res.RunStage
+		}
+		return res, &gatewayStageError{stage, err}
+	}
+	return res, err
 }
 
 // acquire 选账号。
 func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, error) {
+	if req.AccountID != "" && req.AllowedAccounts != nil {
+		allowed := false
+		for _, id := range req.AllowedAccounts {
+			allowed = allowed || id == req.AccountID
+		}
+		if !allowed {
+			return nil, account.ErrNoAccount
+		}
+		copy := *req
+		copy.AllowedAccounts = nil
+		return r.acquire(ctx, &copy)
+	}
 	if req.AllowedAccounts != nil {
 		return r.acquireCatalog(ctx, req)
 	}
@@ -378,6 +413,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	result := &RunResult{AccountID: acct.ID, Started: started}
 
 	// 1) 项目：会话内复用，建工程比推理本身还慢。
+	result.RunStage = "project"
 	projectID := req.ProjectID
 	if projectID == "" {
 		id, err := r.resolveProject(ctx, acct, req)
@@ -415,12 +451,22 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// status:"completed" + response.status:"error"、reason="sandbox_reconnecting"，
 	// 看起来像"上游挂了"，实际上是"你没给我沙箱"。
 	// 上游的 codexRequestDebug 里会直接写 sandbox_url_resolved: null。
+	result.RunStage = "sandbox"
 	var sb *prism.Sandbox
-	if !req.IsAux {
+	if req.GatewayResume != nil {
+		restored, err := restoreGatewaySandbox(ctx, r.client, p, req.GatewayResume)
+		if err != nil {
+			return result, err
+		}
+		sb = restored
+	} else if !req.IsAux {
 		s, err := r.ensureSandbox(ctx, acct, projectID)
 		if err != nil {
 			r.log.Warn("申请沙箱失败，尝试不带沙箱继续", "account", acct.ID, "err", err)
 			r.app.SandboxOps.Inc("acquire", "error")
+			if req.Isolated {
+				return result, err
+			}
 		} else {
 			sb = s
 		}
@@ -439,7 +485,8 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 最终会话处理固定 122 秒后 504 —— 看起来像"上游挂了"。
 	//
 	// 失败同样不阻断：start 会给出明确原因。
-	if sb.Usable() && projectID != "" {
+	result.RunStage = "workspace_sync"
+	if req.GatewayResume == nil && sb.Usable() && projectID != "" {
 		if !r.syncSandboxWorkspace(ctx, acct, sb, projectID) {
 			// 同步未就绪还硬上 start，上游**必然**回
 			// "Project file synchronization timed out"（122 秒后 504）——
@@ -474,10 +521,15 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		meta["sandbox_token"] = sb.Token
 	}
 
+	result.RunStage = "conversation_create"
+	if err := prepareGatewaySnapshot(ctx, r.client, p, req, projectID, sb, meta); err != nil {
+		return result, err
+	}
+	result.RunStage = "upload"
 	inputItems := req.Input
 	if req.Isolated {
 		var imageErr error
-		inputItems, imageErr = preprocessGatewayImages(ctx, r.client, p, projectID, inputItems)
+		inputItems, imageErr = preprocessGatewayImages(ctx, r.client, p, projectID, inputItems, r.cfg.Facade.Gateway.Bridge.UploadMode)
 		if imageErr != nil {
 			return result, imageErr
 		}
@@ -497,8 +549,10 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	)
 	// 沙箱冷启动时上游会回 504 文案并提示 "Please submit prompt again"，
 	// 这是上游自己建议的处理方式 —— 照做即可，不要当成协议错误。
+	result.RunStage = "start"
 	for attempt := 1; attempt <= sandboxStartRetries; attempt++ {
 		startResp, err = r.client.StartResponse(ctx, p, &prism.StartRequest{
+			MaxBodyBytes:       req.GatewayMaxStartBytes,
 			Input:              inputItems,
 			PreviousResponseID: req.PreviousResponseID,
 			ConversationID:     req.ConversationID,
@@ -509,7 +563,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			Extra:              req.Extra,
 		})
 		if err != nil {
-			if isSentinelThrottle(err) && attempt < sandboxStartRetries {
+			if !req.Isolated && isSentinelThrottle(err) && attempt < sandboxStartRetries {
 				r.log.Info("start 遭遇 Sentinel 风控抖动，稍后重试", "attempt", attempt, "err", err)
 				if serr := sleepCtx(ctx, 1500*time.Millisecond); serr != nil {
 					return result, serr
@@ -519,7 +573,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			r.app.ConversationOps.Inc("start", "error")
 			return result, err
 		}
-		if !isSandboxNotReady(startResp) {
+		if req.Isolated || !isSandboxNotReady(startResp) {
 			break
 		}
 		r.app.SandboxOps.Inc("start", "not_ready")
@@ -561,6 +615,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		turnState = startResp.TurnState
 	)
 
+	if convID == "" && req.GatewayStateful {
+		convID = req.ConversationID
+	}
 	result.RequestID = requestID
 	result.ConversationID = convID
 	finished := false
@@ -651,6 +708,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			if result.ProjectID != "" && result.ConversationID != "" {
 				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
 			}
+			result.GatewayState = captureGatewayState(req, result, sb)
 			return result, nil
 		}
 		if len(st.TurnState) > 0 {
@@ -667,6 +725,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			r.client.Schema().RespIDKeys)
 	}
 
+	result.RunStage = "poll"
 	// 4) 轮询直到终态。
 	f := &r.cfg.Facade
 	limit := f.MaxPollTimeout
@@ -831,6 +890,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			if result.ProjectID != "" && result.ConversationID != "" {
 				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
 			}
+			result.GatewayState = captureGatewayState(req, result, sb)
 			return result, nil
 		}
 	}

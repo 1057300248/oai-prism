@@ -22,6 +22,7 @@ const MaxItems = 1024
 
 // Options are operator-owned configuration, never request overrides.
 type Options struct {
+	Bridge           BridgePolicy        `yaml:"bridge"`
 	Files            attachment.Options  `yaml:"files"`
 	Media            MediaPolicy         `yaml:"media"`
 	Catalog          catalog.Options     `yaml:"catalog"`
@@ -47,6 +48,9 @@ type Options struct {
 }
 
 func (o Options) Validate() error {
+	if err := o.validateBridge(); err != nil {
+		return err
+	}
 	if err := o.Files.Validate(); err != nil {
 		return err
 	}
@@ -144,6 +148,10 @@ type Tool struct {
 	Strict               bool            `json:"strict"`
 }
 type Request struct {
+	Bridge               BridgePolicy   `json:"-"`
+	UpstreamState        *UpstreamState `json:"-"`
+	ContinuationOffset   int            `json:"-"`
+	StoredConversation   bool           `json:"-"`
 	FileIDs              []string
 	HasMedia             bool
 	MediaPolicy          MediaPolicy
@@ -192,6 +200,7 @@ type Usage struct {
 	Source     string // upstream | estimated
 }
 type Result struct {
+	UpstreamState    *UpstreamState `json:"-"`
 	ReasoningSummary string
 	Text             string
 	Calls            []Item
@@ -211,6 +220,7 @@ type Engine interface {
 }
 
 type APIError struct {
+	Stage      string
 	Context    *ContextReport
 	Status     int
 	Code       string
@@ -255,6 +265,9 @@ func errorBody(api *APIError) map[string]any {
 		param = api.Param
 	}
 	body := map[string]any{"error": map[string]any{"message": api.Message, "type": typ, "code": api.Code, "param": param}}
+	if api.Stage != "" {
+		body["x_oaiprism_stage"] = api.Stage
+	}
 	if api.Context != nil {
 		body["x_oaiprism_context"] = api.Context
 	}

@@ -502,6 +502,9 @@ func (c *Client) ConversationHistory(ctx context.Context, p Principal, payload m
 // 只看 HTTP 状态码会把失败当成功，这是本协议最容易踩的坑。
 func (c *Client) StartResponse(ctx context.Context, p Principal, req *StartRequest) (*StartResponse, error) {
 	payload := c.buildStartPayload(req)
+	if err := checkStartSize(payload, req.MaxBodyBytes); err != nil {
+		return nil, err
+	}
 
 	var raw json.RawMessage
 	if _, _, _, err := c.doJSON(ctx, p, http.MethodPost, c.schema.StartPath, payload, &raw, "application/json"); err != nil {
@@ -513,6 +516,7 @@ func (c *Client) StartResponse(ctx context.Context, p Principal, req *StartReque
 
 	// 优先走精确的协议解析——我们已经知道包络长什么样了。
 	if st, ok := c.parseEnvelope(v, raw, "", ""); ok {
+		enrichContinuationStatus(st, raw)
 		out.RequestID = st.RequestID
 		out.TurnState = st.TurnState
 		out.ConversationID = st.ConversationID
@@ -738,6 +742,7 @@ func (c *Client) parseStatus(raw []byte, fallbackID, prevText string) (*StatusRe
 	}
 
 	if st, ok := c.parseEnvelope(v, raw, fallbackID, prevText); ok {
+		enrichContinuationStatus(st, raw)
 		return st, nil
 	}
 	return c.parseGeneric(v, raw, fallbackID, prevText)

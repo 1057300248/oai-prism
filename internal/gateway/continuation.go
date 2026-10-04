@@ -1,0 +1,281 @@
+package gateway
+
+import (
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"sync"
+	"time"
+)
+
+// UpstreamState never appears in public JSON or the Responses database. Opaque
+// snapshots and sandbox credentials live only in the bounded process-local cache.
+// Restart deliberately falls back to explicit full history, not guessed cursors.
+type UpstreamState struct {
+	Epoch          uint64          `json:"-"`
+	AccountID      string          `json:"-"`
+	ProjectID      string          `json:"-"`
+	ConversationID string          `json:"-"`
+	ResponseID     string          `json:"-"`
+	ListenSnapshot json.RawMessage `json:"-"`
+	Sandbox        json.RawMessage `json:"-"`
+}
+
+func (s *UpstreamState) clone() *UpstreamState {
+	if s == nil {
+		return nil
+	}
+	c := *s
+	c.ListenSnapshot = append(json.RawMessage(nil), s.ListenSnapshot...)
+	c.Sandbox = append(json.RawMessage(nil), s.Sandbox...)
+	return &c
+}
+func (s *UpstreamState) usable() bool {
+	return s != nil && s.AccountID != "" && s.ProjectID != "" && s.ConversationID != "" && s.ResponseID != "" && len(s.ListenSnapshot) > 0 && len(s.ListenSnapshot) <= 64<<10 && json.Valid(s.ListenSnapshot) && len(s.Sandbox) > 0 && len(s.Sandbox) <= 16<<10 && json.Valid(s.Sandbox)
+}
+
+type continuationRecord struct {
+	key, session, owner, profile, prefix string
+	count                                int
+	state                                *UpstreamState
+	expires                              time.Time
+	busy, revoked                        bool
+}
+type continuationRegistry struct {
+	mu       sync.Mutex
+	records  map[string]*continuationRecord
+	sessions map[string]*continuationRecord
+	now      func() time.Time
+}
+
+func newContinuationRegistry() *continuationRegistry {
+	return &continuationRegistry{records: map[string]*continuationRecord{}, sessions: map[string]*continuationRecord{}, now: time.Now}
+}
+func continuationKey(owner, id string) string {
+	sum := sha256.Sum256([]byte(owner + "\x00" + id))
+	return hex.EncodeToString(sum[:])
+}
+func (c *continuationRegistry) remove(r *continuationRecord) {
+	if c.records[r.key] == r {
+		delete(c.records, r.key)
+	}
+	if r.session != "" && c.sessions[r.session] == r {
+		delete(c.sessions, r.session)
+	}
+	r.state = nil
+}
+func (c *continuationRegistry) clear() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, r := range c.records {
+		r.revoked = true
+		r.state = nil
+	}
+	clear(c.records)
+	clear(c.sessions)
+}
+func (c *continuationRegistry) revoke(owner, id string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if r := c.records[continuationKey(owner, id)]; r != nil {
+		r.revoked = true
+		if !r.busy {
+			c.remove(r)
+		}
+	}
+}
+func (c *continuationRegistry) stats() map[string]any {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	busy := 0
+	for _, r := range c.records {
+		if r.busy {
+			busy++
+		}
+	}
+	return map[string]any{"records": len(c.records), "busy": busy, "limit": 64, "persistence": "none", "automatic_replay_after_unknown_outcome": false}
+}
+
+// Include pixels/file bytes, role, ordering, namespace, arguments and results.
+// Normalizing presentation IDs must never make two different attachments equal.
+func continuationHistoryHash(items []Item) string {
+	canonical := CanonicalItems(items)
+	for i := range canonical {
+		for j := range canonical[i].Content {
+			p := &canonical[i].Content[j]
+			if p.Type == "input_text" || p.Type == "output_text" || p.Type == "text" {
+				p.Type = "text"
+			}
+			if p.Type == "input_image" {
+				header, data, ok := strings.Cut(p.ImageURL, ",")
+				if ok {
+					if raw, err := base64.StdEncoding.Strict().DecodeString(data); err == nil {
+						sum := sha256.Sum256(raw)
+						p.ImageURL = header + ",sha256:" + hex.EncodeToString(sum[:])
+					}
+				}
+			}
+			if p.FileData != "" {
+				sum := sha256.Sum256([]byte(p.FileData))
+				p.FileData = "sha256:" + hex.EncodeToString(sum[:])
+			}
+		}
+	}
+	raw, _ := json.Marshal(canonical)
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+func continuationProfile(q *Request) string {
+	pinned := []Item{}
+	for _, it := range q.Items {
+		if it.Role == "system" || it.Role == "developer" {
+			pinned = append(pinned, it)
+		}
+	}
+	raw, _ := json.Marshal(struct {
+		Model, Route, Effort, Instructions, Placement, Upload, Choice, Format, Summary, CacheKey, Retention string
+		Parallel                                                                                            bool
+		Maximum                                                                                             int
+		Pinned                                                                                              []Item
+		Tools                                                                                               []Tool
+		Schema                                                                                              json.RawMessage
+		Stop                                                                                                []string
+		CacheOptions                                                                                        map[string]json.RawMessage
+	}{q.Model, q.ResolvedModel, q.Effort, q.Instructions, q.Bridge.InstructionPlacement, q.Bridge.UploadMode, q.ToolChoice, q.Format, q.ReasoningSummary, q.ScopedCacheKey, q.PromptCacheRetention, q.Parallel, q.MaxTokens, CanonicalItems(pinned), q.Tools, q.Schema, q.Stop, q.PromptCacheOptions})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+type continuationLease struct {
+	registry  *continuationRegistry
+	record    *continuationRecord
+	owner, id string
+	ttl       time.Duration
+	closed    bool
+}
+
+func (h *Handler) beginContinuation(q *Request, owner, id string, headers http.Header) (*continuationLease, error) {
+	policy := h.options.Bridge.Continuation
+	if !policy.Enabled || !q.Store || q.InternalSummary {
+		return nil, nil
+	}
+	allowed := false
+	for _, model := range policy.VerifiedModels {
+		allowed = allowed || model == q.Model
+	}
+	if !allowed {
+		return nil, nil
+	}
+	session := ""
+	if policy.SessionHeader != "" {
+		values := headers.Values(policy.SessionHeader)
+		if len(values) > 1 {
+			return nil, bad("session", "Duplicate client session label.")
+		}
+		if len(values) == 1 {
+			v := strings.TrimSpace(values[0])
+			if v == "" || len(v) > 256 {
+				return nil, bad("session", "Invalid client session label.")
+			}
+			session = continuationKey(owner, "session:"+v)
+		}
+	}
+	c := h.continuations
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.now()
+	for _, r := range c.records {
+		if !r.busy && !now.Before(r.expires) {
+			c.remove(r)
+		}
+	}
+	var rec *continuationRecord
+	if q.PreviousID != "" {
+		rec = c.records[continuationKey(owner, q.PreviousID)]
+	}
+	if session != "" {
+		sr := c.sessions[session]
+		if q.PreviousID != "" && sr != nil && sr != rec {
+			return nil, &APIError{Status: 409, Code: "session_lineage_conflict", Message: "The client session label refers to a different response head. Use a new label for a branch."}
+		}
+		if q.PreviousID == "" {
+			rec = sr
+		}
+	}
+	if rec != nil && rec.busy {
+		return nil, &APIError{Status: 409, Code: "conversation_busy", Message: "A request is already advancing this upstream conversation."}
+	}
+	profile := continuationProfile(q)
+	reusable := rec != nil && !rec.revoked && rec.owner == owner && rec.profile == profile && rec.count > 0 && len(q.Items) > rec.count && rec.state.usable() && continuationHistoryHash(q.Items[:rec.count]) == rec.prefix
+	if reusable && q.AllowedAccounts != nil {
+		ok := false
+		for _, a := range q.AllowedAccounts {
+			ok = ok || a == rec.state.AccountID
+		}
+		reusable = ok
+	}
+	if !reusable {
+		if rec != nil {
+			c.remove(rec)
+		}
+		if len(c.records) >= 64 {
+			return nil, &APIError{Status: 503, Code: "continuation_capacity", Message: "Upstream continuation capacity is exhausted; retry later or send store=false."}
+		}
+		rec = &continuationRecord{key: continuationKey(owner, id), owner: owner, session: session, profile: profile, expires: now.Add(time.Hour)}
+		c.records[rec.key] = rec
+	} else {
+		q.UpstreamState = rec.state.clone()
+		q.ContinuationOffset = rec.count
+	}
+	if session != "" {
+		rec.session = session
+		c.sessions[session] = rec
+	}
+	rec.busy = true
+	q.StoredConversation = true
+	ttl := policy.TTL
+	if ttl == 0 {
+		ttl = 10 * time.Minute
+	}
+	return &continuationLease{registry: c, record: rec, owner: owner, id: id, ttl: ttl}, nil
+}
+func (l *continuationLease) close() {
+	if l == nil || l.closed {
+		return
+	}
+	l.closed = true
+	c := l.registry
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.remove(l.record)
+}
+func (l *continuationLease) complete(q *Request, result *Result, history []Item) {
+	if l == nil || l.closed {
+		return
+	}
+	// Validate response/schema/usage and successfully transmit the terminal event
+	// before installing a next-turn cursor. A failed generation is never reusable.
+	c := l.registry
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	l.closed = true
+	r := l.record
+	c.remove(r)
+	if r.revoked || result == nil || result.Incomplete || !result.UpstreamState.usable() {
+		return
+	}
+	r.key = continuationKey(l.owner, l.id)
+	r.state = result.UpstreamState.clone()
+	r.count = len(history)
+	r.prefix = continuationHistoryHash(history)
+	r.profile = continuationProfile(q)
+	r.expires = c.now().Add(l.ttl)
+	r.busy = false
+	c.records[r.key] = r
+	if r.session != "" {
+		c.sessions[r.session] = r
+	}
+}

@@ -298,6 +298,9 @@ func (s *stream) fail(err error) error {
 	if s.responses {
 		response := responseJSON(s.q, s.id, s.created, "failed", nil, nil)
 		response["error"] = map[string]any{"code": api.Code, "message": api.Message}
+		if api.Stage != "" {
+			response["x_oaiprism_stage"] = api.Stage
+		}
 		if api.Context != nil {
 			response["x_oaiprism_context"] = api.Context
 		}

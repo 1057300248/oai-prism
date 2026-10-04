@@ -249,9 +249,10 @@ func NewAssistantItem(text string) InputItem {
 //	Metadata           -> metadata             （模型参数与运行上下文都塞这里）
 //	ConversationID     -> conversationId       （camelCase！）
 type StartRequest struct {
-	Input []InputItem
+	MaxBodyBytes int
+	Input        []InputItem
 
-	// PreviousResponseID 是上一轮的 request_id。
+	// PreviousResponseID 是上一轮终态 payload.id，不是轮询用的 request_id。
 	// 留空表示"这是一次独立请求，上下文全靠 Input 自带"。
 	PreviousResponseID string
 	ConversationID     string

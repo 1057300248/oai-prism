@@ -23,15 +23,16 @@ import (
 )
 
 type Handler struct {
-	files     *attachment.Store
-	catalog   *catalog.Registry
-	summaries *summaryCache
-	options   Options
-	engine    Engine
-	store     *responseStore
-	keys      [][32]byte
-	peers     []*net.IPNet
-	slots     chan struct{}
+	continuations *continuationRegistry
+	files         *attachment.Store
+	catalog       *catalog.Registry
+	summaries     *summaryCache
+	options       Options
+	engine        Engine
+	store         *responseStore
+	keys          [][32]byte
+	peers         []*net.IPNet
+	slots         chan struct{}
 }
 
 func New(o Options, engine Engine) (*Handler, error) {
@@ -41,7 +42,7 @@ func New(o Options, engine Engine) (*Handler, error) {
 	if engine == nil {
 		return nil, errors.New("gateway engine is required")
 	}
-	h := &Handler{options: o, engine: engine, summaries: newSummaryCache()}
+	h := &Handler{options: o, engine: engine, summaries: newSummaryCache(), continuations: newContinuationRegistry()}
 	for _, key := range o.APIKeys {
 		if key = strings.TrimSpace(key); key != "" {
 			h.keys = append(h.keys, sha256.Sum256([]byte(key)))
@@ -80,6 +81,7 @@ func New(o Options, engine Engine) (*Handler, error) {
 	return h, nil
 }
 func (h *Handler) Close() error {
+	h.continuations.clear()
 	h.catalog.Close()
 	h.summaries.clear()
 	if h.files != nil {
@@ -183,6 +185,15 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, 200, map[string]any{"id": name, "object": "model", "created": 0, "owned_by": "oaiprism"})
 		return
+	case path == "/v1/transport-status":
+		if r.Method != "GET" {
+			h.method(w, "GET")
+			return
+		}
+		report := bridgeStatus(h.options)
+		report["continuation"] = h.continuations.stats()
+		writeJSON(w, 200, report)
+		return
 	case path == "/v1/capabilities":
 		if r.Method != "GET" {
 			h.method(w, "GET")
@@ -235,6 +246,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				h.fail(w, r, nil, missingResponse())
 				return
 			}
+			h.continuations.revoke(owner, id)
 			writeJSON(w, 200, map[string]any{"id": id, "object": "response.deleted", "deleted": true})
 			return
 		}
@@ -282,6 +294,9 @@ func (h *Handler) fail(w http.ResponseWriter, r *http.Request, s *stream, err er
 		return
 	}
 	api := publicError(err)
+	if api.Stage != "" {
+		w.Header().Set("X-Oaiprism-Stage", api.Stage)
+	}
 	if s != nil && s.opened {
 		_ = s.fail(api)
 		return
@@ -440,6 +455,24 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 			q.Items[i].ID = "item_" + uuid.NewString()
 		}
 	}
+	lease, err := h.beginContinuation(q, owner, id, r.Header)
+	if err != nil {
+		h.fail(w, r, s, withContextReport(q, err))
+		return
+	}
+	defer lease.close()
+	mode := "stateless"
+	if lease != nil {
+		mode = "new-stored-conversation"
+	}
+	if q.UpstreamState != nil {
+		mode = "delta"
+	}
+	w.Header().Set("X-Oaiprism-Continuation", mode)
+	if err = CheckTransportBudget(q); err != nil {
+		h.fail(w, r, s, withContextReport(q, err))
+		return
+	}
 	result, err := h.engine.Run(ctx, q, accepted, emit)
 	if s != nil {
 		s.join()
@@ -489,6 +522,9 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		s.join()
 		s.beforeTerminal = persist
 		_, err = s.finish(result, usage)
+		if err == nil {
+			lease.complete(q, result, history)
+		}
 		if err != nil {
 			_, _ = h.store.Delete(context.Background(), id, owner)
 			h.fail(w, r, s, withContextReport(q, err))
@@ -509,5 +545,7 @@ func (h *Handler) generate(w http.ResponseWriter, r *http.Request, owner string,
 		h.fail(w, r, nil, err)
 		return
 	}
-	writeJSON(w, 200, response)
+	if err = writeGeneratedJSON(w, 200, response); err == nil {
+		lease.complete(q, result, history)
+	}
 }

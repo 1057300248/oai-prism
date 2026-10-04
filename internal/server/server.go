@@ -60,6 +60,9 @@ func New(cfg *config.Config, log *slog.Logger) (*Server, error) {
 		if !cfg.Facade.Enabled || cfg.Capture.Enabled {
 			return nil, fmt.Errorf("gateway requires facade enabled and capture disabled")
 		}
+		if gatewayOptions.Bridge.Continuation.Enabled && !cfg.Facade.UseSandbox {
+			return nil, fmt.Errorf("upstream continuation requires facade.use_sandbox")
+		}
 		if err := gatewayOptions.Validate(); err != nil {
 			return nil, err
 		}

@@ -1,0 +1,242 @@
+package gateway
+
+import (
+	"context"
+	"encoding/base64"
+	"encoding/json"
+	"net/http"
+	"strings"
+	"testing"
+	"time"
+)
+
+func TestAdditionalToolsUsesNormalStrictValidation(t *testing.T) {
+	o := options()
+	o.CodexTools = true
+	o.Bridge.AdditionalTools = true
+	good := `{"model":"test-model","input":[{"type":"additional_tools","tools":[{"type":"namespace","name":"local","tools":[{"type":"function","name":"read","parameters":{"type":"object"}}]}]},{"role":"user","content":"hello"}],"tool_choice":"auto"}`
+	q, err := Parse([]byte(good), true, o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(q.Tools) != 1 || q.Tools[0].Namespace != "local" || q.Tools[0].Name != "read" || len(q.Items) != 1 {
+		t.Fatalf("incorrect normalized request: %+v", q)
+	}
+	if _, err = Prepare(q); err != nil {
+		t.Fatal(err)
+	}
+	cases := []string{
+		`{"model":"test-model","input":[{"type":"additional_tools","tools":null},{"role":"user","content":"x"}]}`,
+		`{"model":"test-model","input":[{"type":"additional_tools","tools":[],"instructions":"discard rules"},{"role":"user","content":"x"}]}`,
+		`{"model":"test-model","input":[{"type":"configuration_update","instructions":"change"},{"role":"user","content":"x"}]}`,
+		`{"model":"test-model","input":[{"type":"additional_tools","tools":[]}]}`,
+		`{"model":"test-model","tools":[{"type":"function","name":"same","parameters":{"type":"object"}}],"input":[{"type":"additional_tools","tools":[{"type":"function","name":"same","parameters":{"type":"object"}}]},{"role":"user","content":"x"}]}`,
+	}
+	for _, body := range cases {
+		if _, err = Parse([]byte(body), true, o); err == nil {
+			t.Error("accepted invalid tool dialect", body)
+		}
+	}
+	o.Bridge.AdditionalTools = false
+	if _, err = Parse([]byte(good), true, o); err == nil {
+		t.Fatal("compatibility profile is not opt-in")
+	}
+}
+func TestBridgeDoesNotDiscardLongInstructionsOrMedia(t *testing.T) {
+	text := strings.Repeat("IMPORTANT_RULE_", 500)
+	q := &Request{Instructions: text, Items: []Item{{Type: "message", Role: "developer", Content: []Content{{Type: "input_text", Text: "DEVELOPER_RULE"}}}, {Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "question"}, {Type: "input_image", ImageURL: "data:image/png;base64,eA=="}}}}, Bridge: BridgePolicy{InstructionPlacement: "user_relay"}}
+	rendered := RenderInput(q)
+	raw, _ := json.Marshal(rendered)
+	if !strings.Contains(string(raw), text) || !strings.Contains(string(raw), "DEVELOPER_RULE") || !strings.Contains(string(raw), "data:image/png;base64,eA==") {
+		t.Fatal("rendering lost instructions or media")
+	}
+	if len(rendered) != 2 || rendered[0].Role != "system" {
+		t.Fatal("compatibility copy erased proper system role")
+	}
+	q.Bridge.MaxStartBytes = 4096
+	if err := CheckTransportBudget(q); err == nil {
+		t.Fatal("escaped-byte budget not enforced")
+	}
+	q.Instructions = ""
+	q.Items = []Item{{Type: "message", Role: "user", Content: []Content{{Type: "input_image", ImageURL: "data:image/png;base64," + strings.Repeat("A", 50000)}}}}
+	if err := CheckTransportBudget(q); err != nil {
+		t.Fatalf("binary payload was counted as start JSON: %v", err)
+	}
+}
+func TestContinuationHashesPixelsToolNamespacesAndResults(t *testing.T) {
+	image := func(s string) []Item {
+		return []Item{{Type: "message", Role: "user", Content: []Content{{Type: "input_image", ImageURL: "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte(s))}}}}
+	}
+	if continuationHistoryHash(image("a")) == continuationHistoryHash(image("b")) {
+		t.Fatal("equal image counts hid changed pixels")
+	}
+	a := []Item{{Type: "function_call", CallID: "one", Namespace: "a", Name: "read", Arguments: `{"p":"x"}`}, {Type: "function_call_output", CallID: "one", Output: "first"}}
+	b := append([]Item(nil), a...)
+	b[0].ID = "transport-only"
+	b[0].CallID = "different"
+	b[1].CallID = "different"
+	if continuationHistoryHash(a) != continuationHistoryHash(b) {
+		t.Fatal("opaque transport IDs spoiled canonical history")
+	}
+	b[1].Output = "changed"
+	if continuationHistoryHash(a) == continuationHistoryHash(b) {
+		t.Fatal("tool result was not fingerprinted")
+	}
+	b = append([]Item(nil), a...)
+	b[0].Namespace = "b"
+	if continuationHistoryHash(a) == continuationHistoryHash(b) {
+		t.Fatal("namespace was not fingerprinted")
+	}
+}
+func cursorFixture() *UpstreamState {
+	return &UpstreamState{Epoch: 1, AccountID: "account-a", ProjectID: "project-a", ConversationID: "cid-a", ResponseID: "private-response", ListenSnapshot: json.RawMessage(`{"conversation_id":"cid-a","project_id":"project-a","codex_session_id":"private-session","transcript_cursor":1}`), Sandbox: json.RawMessage(`{"token":"private-sandbox-token","url":"https://prism.openai.com/s/sandboxes/proxy"}`)}
+}
+func continuationHarness(t *testing.T) *Handler {
+	return harness(t, okEngine, func(o *Options) {
+		o.ResponseStore = true
+		o.TenantHeader = "X-Test-Tenant"
+		o.TrustedPeers = []string{"127.0.0.1/32"}
+		o.Bridge.Continuation = ContinuationPolicy{Enabled: true, VerifiedModels: []string{"test-model"}, TTL: time.Minute}
+	})
+}
+func continuationRequest(h *Handler) *Request {
+	return &Request{Bridge: h.options.Bridge, Store: true, Model: "test-model", Format: "text", ToolChoice: "auto", Parallel: true, Items: []Item{{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "first"}}}}}
+}
+func answered(q *Request) []Item {
+	return append(append([]Item(nil), q.Items...), Item{Type: "message", Role: "assistant", Content: []Content{{Type: "output_text", Text: "answer"}}})
+}
+func TestContinuationOneHeadBranchingAndFailureInvalidation(t *testing.T) {
+	h := continuationHarness(t)
+	q := continuationRequest(h)
+	first, err := h.beginContinuation(q, "owner", "resp-one", nil)
+	if err != nil || first == nil || q.UpstreamState != nil {
+		t.Fatal("new", err)
+	}
+	history := answered(q)
+	first.complete(q, &Result{UpstreamState: cursorFixture()}, history)
+	next := continuationRequest(h)
+	next.PreviousID = "resp-one"
+	next.Items = append(history, Item{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "next"}}})
+	lease, err := h.beginContinuation(next, "owner", "resp-two", nil)
+	if err != nil || next.UpstreamState == nil || next.ContinuationOffset != 2 {
+		t.Fatal("resume", err)
+	}
+	competing := *next
+	if _, err = h.beginContinuation(&competing, "owner", "resp-three", nil); publicError(err).Status != 409 {
+		t.Fatal("concurrent head advance accepted", err)
+	}
+	raw, _ := json.Marshal(RenderUpstreamInput(next))
+	if strings.Contains(string(raw), "first") || strings.Contains(string(raw), "answer") || !strings.Contains(string(raw), "next") {
+		t.Fatal("delta replays old text", string(raw))
+	}
+	// A failed/unknown outcome consumes its cursor; there is never automatic replay.
+	lease.close()
+	retry := *next
+	retry.UpstreamState = nil
+	retry.ContinuationOffset = 0
+	fresh, err := h.beginContinuation(&retry, "owner", "resp-four", nil)
+	if err != nil || retry.UpstreamState != nil {
+		t.Fatal("reused failed cursor", err)
+	}
+	fresh.close()
+	// Another caller cannot see records even if it guesses the public response ID.
+	other := continuationRequest(h)
+	other.PreviousID = "resp-one"
+	other.Items = next.Items
+	foreign, err := h.beginContinuation(other, "other-owner", "resp-five", nil)
+	if err != nil || other.UpstreamState != nil {
+		t.Fatal("cross-owner reuse", err)
+	}
+	foreign.close()
+}
+func TestContinuationOptOutExpiryProfileChangeAndRevocation(t *testing.T) {
+	for _, change := range []string{"expired", "instructions", "tools", "account", "revoked"} {
+		t.Run(change, func(t *testing.T) {
+			h := continuationHarness(t)
+			now := time.Now()
+			h.continuations.now = func() time.Time { return now }
+			q := continuationRequest(h)
+			lease, err := h.beginContinuation(q, "owner", "resp-one", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			history := answered(q)
+			lease.complete(q, &Result{UpstreamState: cursorFixture()}, history)
+			next := continuationRequest(h)
+			next.PreviousID = "resp-one"
+			next.Items = append(history, Item{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "next"}}})
+			switch change {
+			case "expired":
+				now = now.Add(2 * time.Minute)
+			case "instructions":
+				next.Instructions = "new policy"
+			case "tools":
+				next.Tools = []Tool{{Type: "function", Name: "new_tool"}}
+			case "account":
+				next.AllowedAccounts = []string{"another-account"}
+			case "revoked":
+				h.continuations.revoke("owner", "resp-one")
+			}
+			l, err := h.beginContinuation(next, "owner", "resp-two", nil)
+			if err != nil || next.UpstreamState != nil {
+				t.Fatal("unsafe reuse", err)
+			}
+			l.close()
+		})
+	}
+	h := continuationHarness(t)
+	q := continuationRequest(h)
+	q.Store = false
+	if l, err := h.beginContinuation(q, "owner", "resp-none", nil); err != nil || l != nil || q.StoredConversation {
+		t.Fatal("store:false retained upstream state")
+	}
+	raw, _ := json.Marshal(&Result{Text: "safe", UpstreamState: cursorFixture()})
+	if strings.Contains(string(raw), "private-") {
+		t.Fatal("private cursor leaked into public JSON")
+	}
+}
+func TestContinuationExplicitSessionDoesNotGuessHistory(t *testing.T) {
+	h := continuationHarness(t)
+	h.options.Bridge.Continuation.SessionHeader = "Session-Id"
+	q := continuationRequest(h)
+	header := http.Header{"Session-Id": []string{"client-session"}}
+	l, err := h.beginContinuation(q, "owner", "resp-one", header)
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := answered(q)
+	l.complete(q, &Result{UpstreamState: cursorFixture()}, history)
+	next := continuationRequest(h)
+	next.Items = append(history, Item{Type: "message", Role: "user", Content: []Content{{Type: "input_text", Text: "next"}}})
+	lease, err := h.beginContinuation(next, "owner", "resp-two", header)
+	if err != nil || next.UpstreamState == nil {
+		t.Fatal("explicit full replay not continued", err)
+	}
+	lease.close()
+	independent := continuationRequest(h)
+	independent.Items = next.Items
+	fresh, err := h.beginContinuation(independent, "owner", "resp-independent", nil)
+	if err != nil || independent.UpstreamState != nil {
+		t.Fatal("history alone picked a session")
+	}
+	fresh.close()
+}
+func TestBridgeTransportFailureOccursBeforeEngine(t *testing.T) {
+	calls := 0
+	h := harness(t, func(context.Context, *Request, func() error, func(Delta) error) (*Result, error) {
+		calls++
+		return nil, nil
+	}, func(o *Options) { o.Bridge.MaxStartBytes = 4096 })
+	raw, _ := json.Marshal(map[string]any{"model": "test-model", "input": strings.Repeat("中\\\"", 3000)})
+	w := call(h, "POST", "/v1/responses", string(raw), "key-a", "")
+	if w.Code != 400 || calls != 0 || !strings.Contains(w.Body.String(), "context_length_exceeded") {
+		t.Fatal(w.Code, calls, w.Body.String())
+	}
+	if w.Header().Get("X-Oaiprism-Stage") != "transport_budget" {
+		t.Fatal("missing safe stage diagnostic")
+	}
+	status := call(h, "GET", "/v1/transport-status", "", "key-a", "")
+	if status.Code != 200 || strings.Contains(status.Body.String(), "key-a") {
+		t.Fatal(status.Body.String())
+	}
+}

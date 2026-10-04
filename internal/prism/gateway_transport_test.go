@@ -1,0 +1,148 @@
+package prism
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"image"
+	"image/png"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/oai-prism/oaiprism/internal/config"
+	"github.com/oai-prism/oaiprism/internal/httpc"
+)
+
+func bridgeClient(t *testing.T, handler http.Handler) *Client {
+	t.Helper()
+	ts := httptest.NewServer(handler)
+	t.Cleanup(ts.Close)
+	cfg := config.Default().Upstream
+	cfg.BaseURL = ts.URL
+	cfg.Origin = ts.URL
+	cfg.ForceHTTP2 = false
+	cfg.Timeout = 2 * time.Second
+	httpClient, err := httpc.New(cfg, httpc.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(httpClient.HTTP.CloseIdleConnections)
+	return New(httpClient, UpstreamOptions{Origin: ts.URL, MaxRetries: 0}, testSchema())
+}
+func TestRawGatewayUploadUsesExactBytesAndCanonicalProjectPath(t *testing.T) {
+	var data bytes.Buffer
+	if err := png.Encode(&data, image.NewRGBA(image.Rect(0, 0, 2, 2))); err != nil {
+		t.Fatal(err)
+	}
+	c := bridgeClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != PathProjectFilesUpload || r.Header.Get("Content-Type") != "image/png" || r.Header.Get("X-Prism-Project-Id") != "project" || r.Header.Get("X-Prism-Require-Project-Edit-Access") != "true" {
+			t.Error("wrong upload envelope", r.URL, r.Header)
+		}
+		got, _ := io.ReadAll(r.Body)
+		if !bytes.Equal(got, data.Bytes()) {
+			t.Error("binary changed or wrapped in multipart")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"projectPath":"/prism-uploads/generated.png"}`))
+	}))
+	path, err := c.UploadGatewayFile(context.Background(), Principal{}, FileUpload{ProjectID: "project", Path: "generated.png", Filename: "generated.png", Data: data.Bytes()}, "raw")
+	if err != nil || path != "/prism-uploads/generated.png" {
+		t.Fatal(path, err)
+	}
+}
+func TestRawUploadErrorsDoNotTryMultipartOrTrustDifferentPaths(t *testing.T) {
+	for _, kind := range []string{"http", "path", "envelope", "oversize"} {
+		t.Run(kind, func(t *testing.T) {
+			var count atomic.Int32
+			c := bridgeClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				count.Add(1)
+				_, _ = io.Copy(io.Discard, r.Body)
+				switch kind {
+				case "http":
+					http.Error(w, "private error", 503)
+				case "path":
+					_, _ = w.Write([]byte(`{"projectPath":"/another-project/file.pdf"}`))
+				case "envelope":
+					_, _ = w.Write([]byte(`{"error":"failed"}`))
+				case "oversize":
+					_, _ = w.Write([]byte(strings.Repeat("x", (1<<20)+1)))
+				}
+			}))
+			_, err := c.UploadGatewayFile(context.Background(), Principal{}, FileUpload{ProjectID: "p", Path: "a.pdf", Filename: "a.pdf", Data: []byte("%PDF-1.4\n%%EOF")}, "raw")
+			if err == nil || count.Load() != 1 {
+				t.Fatal("failed raw upload retried or accepted", err, count.Load())
+			}
+		})
+	}
+}
+func TestCreateStoredConversationDiscoversOnlyNamedSameOriginAction(t *testing.T) {
+	const action = "0123456789abcdef0123456789abcdef01234567"
+	const cid = "cdx1_12345678-1234-1234-1234-123456789abc"
+	var posts atomic.Int32
+	c := bridgeClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == "GET" && r.URL.Path == "/":
+			_, _ = w.Write([]byte(`<script src="https://untrusted.invalid/_next/static/evil.js"></script><script src="/_next/static/page.js"></script>`))
+		case r.Method == "GET" && r.URL.Path == "/_next/static/page.js":
+			fmt.Fprintf(w, `(0,x.createServerReference)("%s",a,b,c,"createProjectConversation")`, action)
+		case r.Method == "POST" && r.URL.Path == "/":
+			posts.Add(1)
+			if r.Header.Get("Next-Action") != action || r.Header.Get("Accept") != "text/x-component" {
+				t.Error("bad server action headers")
+			}
+			var args []string
+			_ = json.NewDecoder(r.Body).Decode(&args)
+			if len(args) != 1 || args[0] != "project-a" {
+				t.Error("project binding missing", args)
+			}
+			fmt.Fprintf(w, "0:{\"x\":true}\n1:%q\n", cid)
+		default:
+			t.Error("unexpected discovery request", r.URL)
+			http.Error(w, "unexpected", 404)
+		}
+	}))
+	got, err := c.CreateStoredConversation(context.Background(), Principal{}, "project-a", "")
+	if err != nil || got != cid || posts.Load() != 1 {
+		t.Fatal(got, err, posts.Load())
+	}
+}
+func TestStoredConversationDoesNotInventIDsOrReplayUnknownActions(t *testing.T) {
+	for _, body := range []string{`1:E{"digest":"unknown action"}`, `1:"not-a-conversation"`, `1:{"example":"cdx1_12345678-1234-1234-1234-123456789abc"}`} {
+		var calls atomic.Int32
+		c := bridgeClient(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { calls.Add(1); _, _ = w.Write([]byte(body)) }))
+		if _, err := c.CreateStoredConversation(context.Background(), Principal{}, "project-a", "0123456789abcdef0123456789abcdef"); err == nil || calls.Load() != 1 {
+			t.Fatal("fake or retried action result", err, calls.Load())
+		}
+	}
+	source := `createServerReference)("0123456789abcdef01234567",a,"someOtherAction");createServerReference)("111111111111111111111111",b,"createProjectConversation")`
+	ids := actionIDs(source)
+	if len(ids) != 1 || ids[0] != "111111111111111111111111" {
+		t.Fatal("discovery matched a neighboring action", ids)
+	}
+}
+func TestStartBudgetChecksActualEscapedJSONBeforeHTTP(t *testing.T) {
+	c := New(nil, UpstreamOptions{}, testSchema())
+	req := &StartRequest{MaxBodyBytes: 100, Input: []InputItem{NewUserItem(strings.Repeat("中\"\\", 100))}, Metadata: map[string]any{"token": "private"}}
+	_, err := c.StartResponse(context.Background(), Principal{}, req)
+	var size *StartSizeError
+	if !errors.As(err, &size) || size.Actual <= size.Limit {
+		t.Fatal("start byte limit not enforced before network", err)
+	}
+}
+func TestTerminalPayloadListenSnapshotIsRetained(t *testing.T) {
+	c := New(nil, UpstreamOptions{}, testSchema())
+	for _, key := range []string{"codex_listen_snapshot", "codexListenSnapshot"} {
+		raw := []byte(fmt.Sprintf(`{"status":"completed","request_id":"poll-id","response":{"status":"success","payload":{"id":"response-id","conversationId":"cid-new","%s":{"conversation_id":"cid-new","project_id":"p","codex_session_id":"s","transcript_cursor":8},"output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}}}`, key))
+		st, err := c.ParseStatusPayload(raw, "", "")
+		if err != nil || len(st.ListenSnapshot) == 0 || st.ConversationID != "cid-new" || st.ResponseID != "response-id" {
+			t.Fatalf("lost terminal snapshot: %+v %v", st, err)
+		}
+	}
+}

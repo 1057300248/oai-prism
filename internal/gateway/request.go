@@ -82,7 +82,10 @@ func Parse(body []byte, responses bool, o Options) (*Request, error) {
 	if err = keys(m, allowed); err != nil {
 		return nil, err
 	}
-	q := &Request{CodexTools: o.CodexTools, Format: "text", ToolChoice: "auto", Parallel: true, Store: responses && o.ResponseStore, Metadata: map[string]string{}}
+	if err := normalizeAdditionalTools(m, responses, o); err != nil {
+		return nil, err
+	}
+	q := &Request{Bridge: o.Bridge, CodexTools: o.CodexTools, Format: "text", ToolChoice: "auto", Parallel: true, Store: responses && o.ResponseStore, Metadata: map[string]string{}}
 	for k, raw := range m {
 		switch k {
 		case "model":
