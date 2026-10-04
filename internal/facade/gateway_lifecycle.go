@@ -2,6 +2,8 @@ package facade
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -10,6 +12,7 @@ import (
 	"time"
 
 	"github.com/oai-prism/oaiprism/internal/account"
+	"github.com/oai-prism/oaiprism/internal/creds"
 	"github.com/oai-prism/oaiprism/internal/gateway"
 	"github.com/oai-prism/oaiprism/internal/prism"
 )
@@ -29,12 +32,14 @@ func (r *Runner) fenceGatewayAccount(acct *account.Account, req *RunRequest) err
 	if !req.Isolated {
 		return nil
 	}
+	req.GatewayCredentialSnapshot = acct.Credential()
+	req.GatewayCredentialDigest = gatewayCredentialDigest(req.GatewayCredentialSnapshot)
 	value, _ := r.accountEpoch.LoadOrStore(acct.ID, &atomic.Uint64{})
 	epoch := value.(*atomic.Uint64)
 	if req.GatewayResume != nil {
 		state := req.GatewayResume
-		if state.AccountID != acct.ID || state.Epoch == 0 || epoch.Load() != state.Epoch {
-			return &gateway.APIError{Status: 409, Code: "upstream_cursor_stale", Stage: "continuation", Message: "This account has advanced beyond the saved workspace. Retry with full history; the stale request was not executed."}
+		if state.AccountID != acct.ID || state.Epoch == 0 || epoch.Load() != state.Epoch || state.CredentialDigest != req.GatewayCredentialDigest {
+			return &gateway.APIError{Status: 409, Code: "upstream_cursor_stale", Stage: "continuation", Message: "The account workspace or credentials changed. Retry with full history; the stale request was not executed."}
 		}
 		req.ProjectID = state.ProjectID
 		req.ConversationID = state.ConversationID
@@ -113,7 +118,7 @@ func captureGatewayState(req *RunRequest, result *RunResult, sb *prism.Sandbox) 
 	if err != nil || len(sandbox) > 16<<10 {
 		return nil
 	}
-	return &gateway.UpstreamState{Epoch: req.GatewayEpoch, AccountID: result.AccountID, ProjectID: pid, ConversationID: cid, ResponseID: result.ResponseID, ListenSnapshot: raw, Sandbox: sandbox}
+	return &gateway.UpstreamState{CredentialDigest: req.GatewayCredentialDigest, Epoch: req.GatewayEpoch, AccountID: result.AccountID, ProjectID: pid, ConversationID: cid, ResponseID: result.ResponseID, ListenSnapshot: raw, Sandbox: sandbox}
 }
 func restoreGatewaySandbox(ctx context.Context, client *prism.Client, p prism.Principal, state *gateway.UpstreamState) (*prism.Sandbox, error) {
 	var sb prism.Sandbox
@@ -124,4 +129,34 @@ func restoreGatewaySandbox(ctx context.Context, client *prism.Client, p prism.Pr
 		return nil, fmt.Errorf("stored workspace health: %w", err)
 	}
 	return &sb, nil
+}
+
+// Pin an immutable credential snapshot through project creation, sandbox setup,
+// synchronization, uploads, start and stop. A refresh cannot mix identities
+// halfway through a request, and the next continuation observes the new digest.
+type gatewayCredentialContextKey struct{}
+type pinnedGatewayCredential struct {
+	accountID  string
+	credential *creds.Credential
+}
+
+func withGatewayCredential(ctx context.Context, accountID string, credential *creds.Credential) context.Context {
+	return context.WithValue(ctx, gatewayCredentialContextKey{}, pinnedGatewayCredential{accountID, credential})
+}
+func runnerCredential(ctx context.Context, acct *account.Account) *creds.Credential {
+	if pinned, ok := ctx.Value(gatewayCredentialContextKey{}).(pinnedGatewayCredential); ok && pinned.accountID == acct.ID {
+		return pinned.credential
+	}
+	return acct.Credential()
+}
+func gatewayCredentialDigest(credential *creds.Credential) string {
+	var raw []byte
+	if credential != nil {
+		raw, _ = json.Marshal(struct {
+			Account, User, Access, Cookie string
+			Headers                       map[string]string
+		}{credential.AccountID, credential.UserID, credential.AccessToken, credential.EffectiveCookie(), credential.Headers})
+	}
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
 }

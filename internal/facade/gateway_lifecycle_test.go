@@ -18,7 +18,7 @@ func TestGatewayAccountEpochRejectsStaleOrCrossAccountResume(t *testing.T) {
 	if err := runner.fenceGatewayAccount(accountA, first); err != nil || first.GatewayEpoch != 1 {
 		t.Fatal(err, first.GatewayEpoch)
 	}
-	state := &gateway.UpstreamState{Epoch: first.GatewayEpoch, AccountID: "a", ProjectID: "project", ConversationID: "conversation", ResponseID: "response"}
+	state := &gateway.UpstreamState{CredentialDigest: first.GatewayCredentialDigest, Epoch: first.GatewayEpoch, AccountID: "a", ProjectID: "project", ConversationID: "conversation", ResponseID: "response"}
 	next := &RunRequest{Isolated: true, GatewayResume: state}
 	if err := runner.fenceGatewayAccount(accountA, next); err != nil || next.GatewayEpoch != 2 || next.ProjectID != "project" || next.PreviousResponseID != "response" {
 		t.Fatal("valid resume lost state", err)

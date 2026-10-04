@@ -28,14 +28,16 @@ var ErrClientGone = errors.New("客户端已断开")
 
 // RunRequest 是一次推理请求的中间表示（与具体对外 API 形态无关）。
 type RunRequest struct {
-	GatewayStateful      bool
-	GatewayResume        *gateway.UpstreamState
-	GatewayEpoch         uint64
-	GatewayActionID      string
-	GatewayMaxStartBytes int
-	AllowedAccounts      []string
-	Isolated             bool
-	OnAccepted           func(context.Context) error
+	GatewayCredentialDigest   string
+	GatewayCredentialSnapshot *creds.Credential
+	GatewayStateful           bool
+	GatewayResume             *gateway.UpstreamState
+	GatewayEpoch              uint64
+	GatewayActionID           string
+	GatewayMaxStartBytes      int
+	AllowedAccounts           []string
+	Isolated                  bool
+	OnAccepted                func(context.Context) error
 	// Input 是上游要的 input 数组。
 	//
 	// 由各 API 适配层把 messages / input 翻译成这种条目形态：
@@ -336,6 +338,9 @@ func (r *Runner) runLeased(ctx context.Context, acct *account.Account, req *RunR
 		r.sandboxes.Invalidate(acct.ID)
 		defer r.sandboxes.Invalidate(acct.ID)
 	}
+	if req.Isolated {
+		ctx = withGatewayCredential(ctx, acct.ID, req.GatewayCredentialSnapshot)
+	}
 	res, err := r.runOnce(ctx, acct, req, emit)
 	if req.Isolated && err != nil {
 		stage := "setup"
@@ -397,7 +402,7 @@ func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, 
 func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunRequest, emit func(Delta) error) (*RunResult, error) {
 	started := time.Now()
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	if cred == nil || !cred.Usable() {
 		return nil, &creds.APIError{Op: "acquire", Status: 401, Body: "账号凭据不可用"}
 	}
@@ -441,8 +446,8 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 调用方身份：真实 Web 每轮都带 metadata.userId
 	//（user-Wx7p... 形态，来自 access_token JWT 的 chatgpt_user_id claim，
 	// playwright 抓包实证）。字段名由 buildStartPayload 的 schema 处理。
-	if req.UserID == "" && acct.Credential().UserID != "" {
-		req.UserID = acct.Credential().UserID
+	if req.UserID == "" && cred.UserID != "" {
+		req.UserID = cred.UserID
 	}
 
 	// 2) 沙箱：Prism 的 AI 跑在沙箱容器里，start 必须告诉它用哪个沙箱。
@@ -948,7 +953,7 @@ func (r *Runner) ensureSandbox(ctx context.Context, acct *account.Account, proje
 		return sb, nil
 	}
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
 	var lastErr error
@@ -1022,7 +1027,7 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 		return true
 	}
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 	started := time.Now()
 
@@ -1238,7 +1243,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 }
 
 func (r *Runner) createProject(ctx context.Context, acct *account.Account) (string, error) {
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
 	var lastErr error

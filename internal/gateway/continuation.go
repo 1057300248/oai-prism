@@ -15,13 +15,14 @@ import (
 // snapshots and sandbox credentials live only in the bounded process-local cache.
 // Restart deliberately falls back to explicit full history, not guessed cursors.
 type UpstreamState struct {
-	Epoch          uint64          `json:"-"`
-	AccountID      string          `json:"-"`
-	ProjectID      string          `json:"-"`
-	ConversationID string          `json:"-"`
-	ResponseID     string          `json:"-"`
-	ListenSnapshot json.RawMessage `json:"-"`
-	Sandbox        json.RawMessage `json:"-"`
+	CredentialDigest string          `json:"-"`
+	Epoch            uint64          `json:"-"`
+	AccountID        string          `json:"-"`
+	ProjectID        string          `json:"-"`
+	ConversationID   string          `json:"-"`
+	ResponseID       string          `json:"-"`
+	ListenSnapshot   json.RawMessage `json:"-"`
+	Sandbox          json.RawMessage `json:"-"`
 }
 
 func (s *UpstreamState) clone() *UpstreamState {
@@ -45,6 +46,7 @@ type continuationRecord struct {
 	busy, revoked                        bool
 }
 type continuationRegistry struct {
+	closed   bool
 	mu       sync.Mutex
 	records  map[string]*continuationRecord
 	sessions map[string]*continuationRecord
@@ -70,6 +72,7 @@ func (c *continuationRegistry) remove(r *continuationRecord) {
 func (c *continuationRegistry) clear() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.closed = true
 	for _, r := range c.records {
 		r.revoked = true
 		r.state = nil
@@ -186,6 +189,9 @@ func (h *Handler) beginContinuation(q *Request, owner, id string, headers http.H
 	c := h.continuations
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil, &APIError{Status: 503, Code: "gateway_closed", Stage: "continuation", Message: "Gateway is shutting down."}
+	}
 	now := c.now()
 	for _, r := range c.records {
 		if !r.busy && !now.Before(r.expires) {
@@ -204,6 +210,9 @@ func (h *Handler) beginContinuation(q *Request, owner, id string, headers http.H
 		if q.PreviousID == "" {
 			rec = sr
 		}
+	}
+	if rec != nil && session != "" && rec.session != "" && session != rec.session {
+		return nil, &APIError{Status: 409, Code: "session_lineage_conflict", Message: "A live upstream conversation cannot be relabelled; use a new branch."}
 	}
 	if rec != nil && rec.busy {
 		return nil, &APIError{Status: 409, Code: "conversation_busy", Message: "A request is already advancing this upstream conversation."}
@@ -264,7 +273,7 @@ func (l *continuationLease) complete(q *Request, result *Result, history []Item)
 	l.closed = true
 	r := l.record
 	c.remove(r)
-	if r.revoked || result == nil || result.Incomplete || !result.UpstreamState.usable() {
+	if c.closed || r.revoked || result == nil || result.Incomplete || !result.UpstreamState.usable() {
 		return
 	}
 	r.key = continuationKey(l.owner, l.id)
