@@ -29,6 +29,16 @@ jobs:
         run: |
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          python - <<'PY'
+          from pathlib import Path
+          # The retained workflow was already updated through the authorized
+          # connector; the Actions token only needs to commit source and tests.
+          p=Path('tools/bridge_finalize.py')
+          text=p.read_text()
+          start=text.index("p='.github/workflows/gateway-sdk.yml'")
+          end=text.index("new('internal/gateway/bridge_final_test.go'",start)
+          p.write_text(text[:start]+text[end:])
+          PY
           python tools/bridge_finalize.py
           gofmt -w internal/gateway/context_compaction.go internal/gateway/continuation.go internal/gateway/bridge_final_test.go internal/facade/runner.go internal/facade/gateway_lifecycle.go internal/facade/gateway_lifecycle_test.go internal/facade/gateway_credential_test.go
           git diff --check
@@ -53,8 +63,8 @@ jobs:
           test "$REMOTE" = "$GITHUB_SHA"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git rm tools/bridge_finalize.py .github/workflows/bridge-finalize.yml
-          git add internal/gateway/context_compaction.go internal/gateway/continuation.go internal/gateway/bridge_final_test.go internal/facade/runner.go internal/facade/gateway_lifecycle.go internal/facade/gateway_lifecycle_test.go internal/facade/gateway_credential_test.go .github/workflows/gateway-sdk.yml
+          git rm -f tools/bridge_finalize.py .github/workflows/bridge-finalize.yml
+          git add internal/gateway/context_compaction.go internal/gateway/continuation.go internal/gateway/bridge_final_test.go internal/facade/runner.go internal/facade/gateway_lifecycle.go internal/facade/gateway_lifecycle_test.go internal/facade/gateway_credential_test.go
           git diff --cached --check
           git commit -m 'fix(bridge): fence credential changes and apply transport budgets to summaries'
           git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH" push origin HEAD:refs/heads/codex/newapi-native-hardening-20261003
