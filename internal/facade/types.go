@@ -3,6 +3,7 @@ package facade
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"strings"
 )
 
@@ -317,13 +318,17 @@ type ErrorResponse struct {
 // 代价是两次解析，但换来"任何未来新增字段都能原样透传给上游"，
 // 对反代来说这个性质比那点 CPU 重要得多。
 func decodeJSON[T any](body []byte) (*T, map[string]json.RawMessage, error) {
-	var typed T
-	dec := json.NewDecoder(bytes.NewReader(body))
-	if err := dec.Decode(&typed); err != nil {
-		return nil, nil, err
+	body = bytes.TrimSpace(body)
+	if len(body) == 0 || body[0] != '{' {
+		return nil, nil, errors.New("request must be one JSON object")
 	}
 	var raw map[string]json.RawMessage
-	// 这里忽略错误：能进到这一步说明 JSON 结构本身是合法的。
-	_ = json.Unmarshal(body, &raw)
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return nil, nil, err
+	}
+	var typed T
+	if err := json.Unmarshal(body, &typed); err != nil {
+		return nil, nil, err
+	}
 	return &typed, raw, nil
 }

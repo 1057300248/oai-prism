@@ -1,0 +1,62 @@
+name: Advanced Codex Contract
+on:
+  push:
+    branches: [codex/newapi-native-hardening-20261003]
+  pull_request:
+    paths:
+      - 'internal/**'
+      - 'tools/**'
+      - 'go.mod'
+      - 'go.sum'
+      - '.github/workflows/codex-advanced.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: codex-advanced-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  client-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install pinned public clients and compile localhost fixture
+        run: |
+          set -euo pipefail
+          npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
+          python -m pip install openai==3.24.0
+          go build -o "$RUNNER_TEMP/advanced-fixture" ./tools/codex-advanced-fixture
+          go test ./tools/codex-advanced-fixture
+      - name: Actual sandboxed client and Files SDK contracts
+        run: |
+          set -euo pipefail
+          export CODEX_CLI="$RUNNER_TEMP/codex-tools/node_modules/.bin/codex"
+          export CODEX_ADVANCED_BIN="$RUNNER_TEMP/advanced-fixture"
+          export CODEX_ADVANCED_EVIDENCE="$GITHUB_WORKSPACE/advanced-evidence"
+          bash tools/codex_ci_sandbox.sh python tools/codex_advanced_test.py
+      - name: Record exact source and contract summary
+        if: always()
+        run: |
+          mkdir -p advanced-evidence
+          git rev-parse HEAD > advanced-evidence/source-commit.txt
+          test ! -f advanced-evidence/summary.json || cat advanced-evidence/summary.json
+          test ! -f advanced-evidence/failures.txt || tail -100 advanced-evidence/failures.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: advanced-codex-${{ github.sha }}
+          path: advanced-evidence/
+          retention-days: 3

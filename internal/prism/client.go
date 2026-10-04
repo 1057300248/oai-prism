@@ -106,7 +106,7 @@ func New(base *httpc.Client, up UpstreamOptions, schema SchemaOptions) *Client {
 	if up.UserAgent == "" {
 		up.UserAgent = "Mozilla/5.0"
 	}
-	if up.MaxRetries <= 0 {
+	if up.MaxRetries < 0 {
 		up.MaxRetries = 3
 	}
 	if up.RetryBackoff <= 0 {
@@ -200,7 +200,13 @@ func (c *Client) Do(ctx context.Context, p Principal, method, path string, heade
 		lastErr error
 	)
 
-	for attempt := 0; attempt <= c.up.MaxRetries; attempt++ {
+	// Non-idempotent POSTs (start/project/upload) must not be replayed after
+	// an unknown transport outcome. Retrying a status lookup is safe.
+	maxRetries := c.up.MaxRetries
+	if method != http.MethodGet && method != http.MethodHead && stripQuery(path) != c.schema.StatusPath {
+		maxRetries = 0
+	}
+	for attempt := 0; attempt <= maxRetries; attempt++ {
 		if attempt > 0 {
 			// 指数退避 + 抖动：多实例同时重试时要避免齐步走。
 			delay := backoff(c.up.RetryBackoff, c.up.RetryMaxDelay, attempt)
@@ -274,7 +280,7 @@ func (c *Client) Do(ctx context.Context, p Principal, method, path string, heade
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			ra := parseRetryAfter(resp.Header.Get("Retry-After"))
 			drainClose(resp)
-			if attempt == c.up.MaxRetries {
+			if attempt == maxRetries {
 				return nil, &creds.APIError{
 					Op:         method + " " + stripQuery(path),
 					Status:     resp.StatusCode,
@@ -291,7 +297,7 @@ func (c *Client) Do(ctx context.Context, p Principal, method, path string, heade
 		}
 
 		// 5xx 值得重试；4xx 是确定性错误，重试只会浪费配额。
-		if httpc.RetryableStatus(resp.StatusCode) && attempt < c.up.MaxRetries && bodyReader == nil {
+		if httpc.RetryableStatus(resp.StatusCode) && attempt < maxRetries && bodyReader == nil {
 			drainClose(resp)
 			continue
 		}
@@ -496,6 +502,9 @@ func (c *Client) ConversationHistory(ctx context.Context, p Principal, payload m
 // 只看 HTTP 状态码会把失败当成功，这是本协议最容易踩的坑。
 func (c *Client) StartResponse(ctx context.Context, p Principal, req *StartRequest) (*StartResponse, error) {
 	payload := c.buildStartPayload(req)
+	if err := checkStartSize(payload, req.MaxBodyBytes); err != nil {
+		return nil, err
+	}
 
 	var raw json.RawMessage
 	if _, _, _, err := c.doJSON(ctx, p, http.MethodPost, c.schema.StartPath, payload, &raw, "application/json"); err != nil {
@@ -507,6 +516,7 @@ func (c *Client) StartResponse(ctx context.Context, p Principal, req *StartReque
 
 	// 优先走精确的协议解析——我们已经知道包络长什么样了。
 	if st, ok := c.parseEnvelope(v, raw, "", ""); ok {
+		enrichContinuationStatus(st, raw)
 		out.RequestID = st.RequestID
 		out.TurnState = st.TurnState
 		out.ConversationID = st.ConversationID
@@ -732,6 +742,7 @@ func (c *Client) parseStatus(raw []byte, fallbackID, prevText string) (*StatusRe
 	}
 
 	if st, ok := c.parseEnvelope(v, raw, fallbackID, prevText); ok {
+		enrichContinuationStatus(st, raw)
 		return st, nil
 	}
 	return c.parseGeneric(v, raw, fallbackID, prevText)
@@ -795,6 +806,9 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 			}
 			if env.Response.Payload != nil {
 				payload := env.Response.Payload
+				if payload.Usage != nil {
+					out.Usage = payload.Usage
+				}
 				// payload.id 是上游真正的 response 句柄（resp_*），
 				// 多轮延续靠它；start 的 request_id 只是受理号。
 				out.ResponseID = payload.ID
@@ -899,14 +913,7 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 	// 有的实现把 usage 放在包络顶层。
 	if out.Usage == nil {
 		if u, ok := m["usage"].(map[string]any); ok {
-			out.Usage = &Usage{
-				InputTokens:  intOf(u, "input_tokens", "prompt_tokens"),
-				OutputTokens: intOf(u, "output_tokens", "completion_tokens"),
-				TotalTokens:  intOf(u, "total_tokens"),
-			}
-			if out.Usage.TotalTokens == 0 {
-				out.Usage.TotalTokens = out.Usage.InputTokens + out.Usage.OutputTokens
-			}
+			out.Usage = parseUsageMap(u)
 		}
 	}
 
@@ -950,14 +957,7 @@ func (c *Client) parseEnvelope(v any, raw []byte, fallbackID, prevText string) (
 				// 否则强类型分支因形态漂移失败时会话链就断了（2026-10-02 实测）。
 				out.ResponseID = FindString(payload, []string{"id"})
 				if u, ok := payload["usage"].(map[string]any); ok {
-					out.Usage = &Usage{
-						InputTokens:  intOf(u, "input_tokens", "prompt_tokens"),
-						OutputTokens: intOf(u, "output_tokens", "completion_tokens"),
-						TotalTokens:  intOf(u, "total_tokens"),
-					}
-					if out.Usage.TotalTokens == 0 {
-						out.Usage.TotalTokens = out.Usage.InputTokens + out.Usage.OutputTokens
-					}
+					out.Usage = parseUsageMap(u)
 				}
 			}
 		}
@@ -1129,14 +1129,7 @@ func (c *Client) parseGeneric(v any, raw []byte, fallbackID, prevText string) (*
 
 	if u, ok := FindKey(v, []string{"usage"}, 3); ok {
 		if um, ok := AsMap(u); ok {
-			out.Usage = &Usage{
-				InputTokens:  intOf(um, "input_tokens", "prompt_tokens"),
-				OutputTokens: intOf(um, "output_tokens", "completion_tokens"),
-				TotalTokens:  intOf(um, "total_tokens"),
-			}
-			if out.Usage.TotalTokens == 0 {
-				out.Usage.TotalTokens = out.Usage.InputTokens + out.Usage.OutputTokens
-			}
+			out.Usage = parseUsageMap(um)
 		}
 	}
 

@@ -16,6 +16,10 @@ import (
 
 // handleChatCompletions 实现 POST /v1/chat/completions。
 func (h *Handler) handleChatCompletions(w http.ResponseWriter, r *http.Request) {
+	if r.Header.Get("X-Local-Workspace") != "" {
+		writeError(w, 400, "invalid_request_error", "HTTP clients cannot write server-local workspace files")
+		return
+	}
 	body, err := h.readBody(r)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "invalid_request_error", err.Error())
@@ -217,13 +221,7 @@ func (h *Handler) streamChat(w http.ResponseWriter, r *http.Request, runReq *Run
 	var toolCalls []ToolCall
 	if res != nil && len(res.DeltaFiles) > 0 {
 		toolCalls = MapDeltaFilesToToolCalls(res.DeltaFiles, declaredTools)
-		if localWorkspace := r.Header.Get("X-Local-Workspace"); localWorkspace != "" {
-			if err := ApplyLocalWorkspaceFiles(localWorkspace, res.DeltaFiles); err != nil {
-				h.log.Warn("本地工作区文件写入异常", "path", localWorkspace, "err", err)
-			} else {
-				h.log.Info("已成功将文件变更同步写入本地工作区", "path", localWorkspace, "files", len(res.DeltaFiles))
-			}
-		}
+
 	}
 
 	fin := finishReason(res)
@@ -283,13 +281,7 @@ func (h *Handler) syncChat(w http.ResponseWriter, r *http.Request, runReq *RunRe
 	var toolCalls []ToolCall
 	if res != nil && len(res.DeltaFiles) > 0 {
 		toolCalls = MapDeltaFilesToToolCalls(res.DeltaFiles, declaredTools)
-		if localWorkspace := r.Header.Get("X-Local-Workspace"); localWorkspace != "" {
-			if err := ApplyLocalWorkspaceFiles(localWorkspace, res.DeltaFiles); err != nil {
-				h.log.Warn("本地工作区文件写入异常", "path", localWorkspace, "err", err)
-			} else {
-				h.log.Info("已成功将文件变更同步写入本地工作区", "path", localWorkspace, "files", len(res.DeltaFiles))
-			}
-		}
+
 	}
 
 	fin := finishReason(res)
@@ -376,7 +368,7 @@ func estimateTokens(s string) int {
 			other++
 		}
 	}
-	return cjk + other/4
+	return cjk + (other+3)/4
 }
 
 // mapError 把内部错误映射成 HTTP 状态码。

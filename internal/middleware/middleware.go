@@ -247,6 +247,9 @@ func (s *statusRecorder) Flush() {
 
 // Unwrap 让 http.ResponseController 能找到底层 writer。
 func (s *statusRecorder) Unwrap() http.ResponseWriter { return s.ResponseWriter }
+func (s *statusRecorder) FlushError() error {
+	return http.NewResponseController(s.ResponseWriter).Flush()
+}
 
 // MetricsMiddleware 采集入站指标。
 func MetricsMiddleware(app *metrics.App) Middleware {

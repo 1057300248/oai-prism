@@ -183,8 +183,10 @@ type InputItem struct {
 // 少了它们，图像块的 URL 会无处安放，最终发一个空的 input_image 给上游：
 // 上游不报错，模型只是"看不见图"。这类静默失效极难定位。
 type InputContent struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	// Gateway-only transient data; must be uploaded before encoding the start request.
+	GatewayFileData string `json:"-"`
+	Type            string `json:"type"`
+	Text            string `json:"text,omitempty"`
 	// ImageURL 是 input_image 的图片地址。
 	// 上游字段名就是 image_url（输入块也用它，不是 output 那套）。
 	ImageURL string `json:"image_url,omitempty"`
@@ -247,9 +249,10 @@ func NewAssistantItem(text string) InputItem {
 //	Metadata           -> metadata             （模型参数与运行上下文都塞这里）
 //	ConversationID     -> conversationId       （camelCase！）
 type StartRequest struct {
-	Input []InputItem
+	MaxBodyBytes int
+	Input        []InputItem
 
-	// PreviousResponseID 是上一轮的 request_id。
+	// PreviousResponseID 是上一轮终态 payload.id，不是轮询用的 request_id。
 	// 留空表示"这是一次独立请求，上下文全靠 Input 自带"。
 	PreviousResponseID string
 	ConversationID     string
@@ -428,9 +431,13 @@ type PrismEnvelope struct {
 
 // Usage 是 token 用量。
 type Usage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
-	TotalTokens  int `json:"total_tokens"`
+	CacheWriteTokens *int `json:"-"`
+	Invalid          bool `json:"-"`
+	CachedTokens     *int `json:"-"`
+	ReasoningTokens  *int `json:"-"`
+	InputTokens      int  `json:"input_tokens"`
+	OutputTokens     int  `json:"output_tokens"`
+	TotalTokens      int  `json:"total_tokens"`
 }
 
 // Sandbox 是一次沙箱申请的结果。

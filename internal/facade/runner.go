@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/oai-prism/oaiprism/internal/account"
 	"github.com/oai-prism/oaiprism/internal/config"
 	"github.com/oai-prism/oaiprism/internal/creds"
+	"github.com/oai-prism/oaiprism/internal/gateway"
 	"github.com/oai-prism/oaiprism/internal/metrics"
 	"github.com/oai-prism/oaiprism/internal/prism"
 )
@@ -26,6 +28,16 @@ var ErrClientGone = errors.New("客户端已断开")
 
 // RunRequest 是一次推理请求的中间表示（与具体对外 API 形态无关）。
 type RunRequest struct {
+	GatewayCredentialDigest   string
+	GatewayCredentialSnapshot *creds.Credential
+	GatewayStateful           bool
+	GatewayResume             *gateway.UpstreamState
+	GatewayEpoch              uint64
+	GatewayActionID           string
+	GatewayMaxStartBytes      int
+	AllowedAccounts           []string
+	Isolated                  bool
+	OnAccepted                func(context.Context) error
 	// Input 是上游要的 input 数组。
 	//
 	// 由各 API 适配层把 messages / input 翻译成这种条目形态：
@@ -83,8 +95,11 @@ type Delta struct {
 
 // RunResult 是一次运行的最终结果。
 type RunResult struct {
-	Text      string
-	Reasoning string
+	GatewayState   *gateway.UpstreamState
+	RunStage       string
+	UsageEstimated bool
+	Text           string
+	Reasoning      string
 
 	// RequestID 是上游 start 受理句柄（request_id，仅用于轮询/停止）。
 	//
@@ -126,11 +141,14 @@ type RunResult struct {
 //  1. 失败是 HTTP 200 + response.status:"error"，只看状态码会误判成成功；
 //  2. turn_state 是不透明令牌，必须原样回传，不能自己构造。
 type Runner struct {
-	cfg      *config.Config
-	log      *slog.Logger
-	pool     *account.Pool
-	client   *prism.Client
-	projects *projectCache
+	accountEpoch sync.Map
+	stopGC       context.CancelFunc
+	accountGates sync.Map
+	cfg          *config.Config
+	log          *slog.Logger
+	pool         *account.Pool
+	client       *prism.Client
+	projects     *projectCache
 	// sandboxes 按账号缓存沙箱。沙箱令牌不绑定项目，按账号缓存即可，
 	// 省掉每次请求都去 POST /api/backend/1/new 的往返与冷启动。
 	sandboxes *sandboxCache
@@ -155,16 +173,30 @@ func NewRunner(cfg *config.Config, log *slog.Logger, pool *account.Pool, client 
 		app:            app,
 		accountRetries: 2,
 	}
-	go r.projects.gc(context.Background())
-	go r.sandboxes.gc(context.Background())
+	gcCtx, cancelGC := context.WithCancel(context.Background())
+	r.stopGC = cancelGC
+	go r.projects.gc(gcCtx)
+	go r.sandboxes.gc(gcCtx)
 	go func() {
 		ticker := time.NewTicker(10 * time.Minute)
 		defer ticker.Stop()
-		for range ticker.C {
-			r.journal.Cleanup(1 * time.Hour)
+		for {
+			select {
+			case <-gcCtx.Done():
+				return
+			case <-ticker.C:
+				r.journal.Cleanup(1 * time.Hour)
+			}
 		}
 	}()
 	return r
+}
+
+// Close stops runner-owned maintenance goroutines.
+func (r *Runner) Close() {
+	if r.stopGC != nil {
+		r.stopGC()
+	}
 }
 
 // ProjectCacheSize 供指标使用。
@@ -175,6 +207,23 @@ func (r *Runner) ProjectCacheSize() int { return r.projects.Size() }
 // emit 为 nil 表示同步模式：不回调，只返回最终结果。
 // emit 返回 error 会立即中止流程（用于下游断连）。
 func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) error) (*RunResult, error) {
+	copied := *req
+	req = &copied
+	limit := r.cfg.Facade.MaxPollTimeout
+	if emit == nil && r.cfg.Facade.SyncTimeout > 0 && (limit <= 0 || r.cfg.Facade.SyncTimeout < limit) {
+		limit = r.cfg.Facade.SyncTimeout
+	}
+	if req.Deadline > 0 && (limit <= 0 || req.Deadline < limit) {
+		limit = req.Deadline
+	}
+	if limit > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, limit)
+		defer cancel()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	started := time.Now()
 	api := req.API
 	if api == "" {
@@ -186,6 +235,21 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 		emitted bool
 	)
 
+	if emit != nil {
+		downstream := emit
+		emit = func(d Delta) error {
+			if d.Reset && emitted {
+				return errors.New("upstream rewrote already streamed output")
+			}
+			if d.Text != "" || d.Reasoning != "" {
+				emitted = true
+			}
+			if err := downstream(d); err != nil {
+				return fmt.Errorf("%w: %w", ErrClientGone, err)
+			}
+			return nil
+		}
+	}
 	for attempt := 0; attempt < r.accountRetries; attempt++ {
 		lease, err := r.acquire(ctx, req)
 		if err != nil {
@@ -198,8 +262,14 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 			req.Deadline = r.cfg.Facade.SyncTimeout
 		}
 
-		res, err := r.runOnce(ctx, lease.Account, req, emit)
+		res, err := r.runLeased(ctx, lease.Account, req, emit)
 		lease.Release()
+		if err == nil && res == nil {
+			err = errors.New("upstream returned no result")
+		}
+		if err == nil && res.Usage != nil && res.Usage.Invalid {
+			err = errors.New("invalid upstream usage")
+		}
 
 		if err == nil {
 			r.app.FacadeRuns.Inc(api, req.Model, "ok")
@@ -214,16 +284,19 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 		lastErr = err
 
 		// 客户端主动断开：不重试，取消已经传给上游。
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrClientGone) || errors.Is(err, account.ErrNoAccount) {
 			r.app.ClientAborts.Inc()
 			r.app.FacadeRuns.Inc(api, req.Model, "aborted")
 			return res, err
 		}
 
 		r.pool.MarkResult(lease.Account, err, retryAfter(err))
+		if req.GatewayStateful {
+			return res, err
+		}
 
 		// 已经吐过内容就不能换号重试，否则客户端会收到两段拼接的回答。
-		if res != nil && res.Text != "" {
+		if res != nil && (res.Text != "" || res.Reasoning != "" || res.RequestID != "") {
 			emitted = true
 		}
 		if emitted {
@@ -247,8 +320,55 @@ func (r *Runner) Run(ctx context.Context, req *RunRequest, emit func(Delta) erro
 	return nil, lastErr
 }
 
+func (r *Runner) runLeased(ctx context.Context, acct *account.Account, req *RunRequest, emit func(Delta) error) (*RunResult, error) {
+	if req.Isolated {
+		value, _ := r.accountGates.LoadOrStore(acct.ID, make(chan struct{}, 1))
+		gate := value.(chan struct{})
+		select {
+		case gate <- struct{}{}:
+			defer func() { <-gate }()
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+			return nil, account.ErrNoAccount
+		}
+		if err := r.fenceGatewayAccount(acct, req); err != nil {
+			return nil, err
+		}
+		r.sandboxes.Invalidate(acct.ID)
+		defer r.sandboxes.Invalidate(acct.ID)
+	}
+	if req.Isolated {
+		ctx = withGatewayCredential(ctx, acct.ID, req.GatewayCredentialSnapshot)
+	}
+	res, err := r.runOnce(ctx, acct, req, emit)
+	if req.Isolated && err != nil {
+		stage := "setup"
+		if res != nil && res.RunStage != "" {
+			stage = res.RunStage
+		}
+		return res, &gatewayStageError{stage, err}
+	}
+	return res, err
+}
+
 // acquire 选账号。
 func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, error) {
+	if req.AccountID != "" && req.AllowedAccounts != nil {
+		allowed := false
+		for _, id := range req.AllowedAccounts {
+			allowed = allowed || id == req.AccountID
+		}
+		if !allowed {
+			return nil, account.ErrNoAccount
+		}
+		copy := *req
+		copy.AllowedAccounts = nil
+		return r.acquire(ctx, &copy)
+	}
+	if req.AllowedAccounts != nil {
+		return r.acquireCatalog(ctx, req)
+	}
 	if req.AccountID != "" {
 		if a := r.pool.Get(req.AccountID); a != nil {
 			if a.Acquire(time.Now()) {
@@ -257,9 +377,16 @@ func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, 
 			}
 			r.app.AccountPick.Inc("pinned_busy")
 		}
+		return nil, account.ErrNoAccount
 	}
 	lease, err := r.pool.Acquire(ctx, req.StickyKey)
 	if err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		if req.Isolated {
+			return nil, account.ErrNoAccount
+		}
 		r.app.AccountPick.Inc("empty")
 		// 把凭据文件位置写进错误里：这是首次部署最常见的问题，
 		// 让用户在一次响应里就知道该去改哪个文件，而不是翻日志。
@@ -275,7 +402,7 @@ func (r *Runner) acquire(ctx context.Context, req *RunRequest) (*account.Lease, 
 func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunRequest, emit func(Delta) error) (*RunResult, error) {
 	started := time.Now()
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	if cred == nil || !cred.Usable() {
 		return nil, &creds.APIError{Op: "acquire", Status: 401, Body: "账号凭据不可用"}
 	}
@@ -291,10 +418,14 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	result := &RunResult{AccountID: acct.ID, Started: started}
 
 	// 1) 项目：会话内复用，建工程比推理本身还慢。
+	result.RunStage = "project"
 	projectID := req.ProjectID
 	if projectID == "" {
 		id, err := r.resolveProject(ctx, acct, req)
 		if err != nil {
+			if req.Isolated {
+				return result, err
+			}
 			// 上下文取消是**终态**，不是"可降级继续"的故障。
 			// 如果把它混进下面的降级分支，我们就会拿着一个已取消的 ctx
 			// 继续发起 start 请求 —— 白跑一趟，还会在日志里留下误导性的
@@ -315,8 +446,8 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 调用方身份：真实 Web 每轮都带 metadata.userId
 	//（user-Wx7p... 形态，来自 access_token JWT 的 chatgpt_user_id claim，
 	// playwright 抓包实证）。字段名由 buildStartPayload 的 schema 处理。
-	if req.UserID == "" && acct.Credential().UserID != "" {
-		req.UserID = acct.Credential().UserID
+	if req.UserID == "" && cred.UserID != "" {
+		req.UserID = cred.UserID
 	}
 
 	// 2) 沙箱：Prism 的 AI 跑在沙箱容器里，start 必须告诉它用哪个沙箱。
@@ -325,12 +456,22 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// status:"completed" + response.status:"error"、reason="sandbox_reconnecting"，
 	// 看起来像"上游挂了"，实际上是"你没给我沙箱"。
 	// 上游的 codexRequestDebug 里会直接写 sandbox_url_resolved: null。
+	result.RunStage = "sandbox"
 	var sb *prism.Sandbox
-	if !req.IsAux {
+	if req.GatewayResume != nil {
+		restored, err := restoreGatewaySandbox(ctx, r.client, p, req.GatewayResume)
+		if err != nil {
+			return result, err
+		}
+		sb = restored
+	} else if !req.IsAux {
 		s, err := r.ensureSandbox(ctx, acct, projectID)
 		if err != nil {
 			r.log.Warn("申请沙箱失败，尝试不带沙箱继续", "account", acct.ID, "err", err)
 			r.app.SandboxOps.Inc("acquire", "error")
+			if req.Isolated {
+				return result, err
+			}
 		} else {
 			sb = s
 		}
@@ -349,7 +490,8 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	// 最终会话处理固定 122 秒后 504 —— 看起来像"上游挂了"。
 	//
 	// 失败同样不阻断：start 会给出明确原因。
-	if sb.Usable() && projectID != "" {
+	result.RunStage = "workspace_sync"
+	if req.GatewayResume == nil && sb.Usable() && projectID != "" {
 		if !r.syncSandboxWorkspace(ctx, acct, sb, projectID) {
 			// 同步未就绪还硬上 start，上游**必然**回
 			// "Project file synchronization timed out"（122 秒后 504）——
@@ -384,10 +526,22 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		meta["sandbox_token"] = sb.Token
 	}
 
+	result.RunStage = "conversation_create"
+	if err := prepareGatewaySnapshot(ctx, r.client, p, req, projectID, sb, meta); err != nil {
+		return result, err
+	}
+	result.RunStage = "upload"
 	inputItems := req.Input
-	if projectID != "" {
+	if req.Isolated {
+		var imageErr error
+		inputItems, imageErr = preprocessGatewayImages(ctx, r.client, p, projectID, inputItems, r.cfg.Facade.Gateway.Bridge.UploadMode)
+		if imageErr != nil {
+			return result, imageErr
+		}
+	} else if projectID != "" {
 		inputItems = preprocessInputImages(ctx, r.client, p, projectID, inputItems)
 	}
+
 	// 注意：此处不做任何轮次标记/扰动。2026-10-02 实验矩阵证明
 	// system comment 与零宽空格两类标记本身就会让历史到达失败
 	//（带 marker 的 W/Y/N 系列全败，无 marker 的 B/B2/K 全胜）。
@@ -400,8 +554,10 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	)
 	// 沙箱冷启动时上游会回 504 文案并提示 "Please submit prompt again"，
 	// 这是上游自己建议的处理方式 —— 照做即可，不要当成协议错误。
+	result.RunStage = "start"
 	for attempt := 1; attempt <= sandboxStartRetries; attempt++ {
 		startResp, err = r.client.StartResponse(ctx, p, &prism.StartRequest{
+			MaxBodyBytes:       req.GatewayMaxStartBytes,
 			Input:              inputItems,
 			PreviousResponseID: req.PreviousResponseID,
 			ConversationID:     req.ConversationID,
@@ -412,7 +568,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			Extra:              req.Extra,
 		})
 		if err != nil {
-			if isSentinelThrottle(err) && attempt < sandboxStartRetries {
+			if !req.Isolated && isSentinelThrottle(err) && attempt < sandboxStartRetries {
 				r.log.Info("start 遭遇 Sentinel 风控抖动，稍后重试", "attempt", attempt, "err", err)
 				if serr := sleepCtx(ctx, 1500*time.Millisecond); serr != nil {
 					return result, serr
@@ -422,7 +578,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			r.app.ConversationOps.Inc("start", "error")
 			return result, err
 		}
-		if !isSandboxNotReady(startResp) {
+		if req.Isolated || !isSandboxNotReady(startResp) {
 			break
 		}
 		r.app.SandboxOps.Inc("start", "not_ready")
@@ -464,16 +620,27 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		turnState = startResp.TurnState
 	)
 
+	if convID == "" && req.GatewayStateful {
+		convID = req.ConversationID
+	}
 	result.RequestID = requestID
 	result.ConversationID = convID
+	finished := false
+	defer func() {
+		if !finished && requestID != "" {
+			r.stopUpstream(p, requestID, convID, turnState)
+		}
+	}()
 	if len(startResp.ListenSnapshot) > 0 {
 		result.ListenSnapshot = startResp.ListenSnapshot
 	}
 
 	if requestID != "" {
-		r.journal.RecordStart(requestID, convID, acct.ID, projectID, turnState)
+		if !req.Isolated {
+			r.journal.RecordStart(requestID, convID, acct.ID, projectID, turnState)
+		}
 	}
-	if len(turnState) > 0 {
+	if !req.Isolated && len(turnState) > 0 {
 		var tsMap map[string]any
 		if err := json.Unmarshal(turnState, &tsMap); err == nil {
 			if promptStr, ok := tsMap["prompt"].(string); ok && promptStr != "" {
@@ -482,6 +649,11 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		}
 	}
 
+	if req.OnAccepted != nil && (requestID != "" || (startResp.Initial != nil && startResp.Initial.Done)) && (startResp.Initial == nil || !startResp.Initial.Fail) {
+		if err := req.OnAccepted(ctx); err != nil {
+			return result, fmt.Errorf("%w: %w", ErrClientGone, err)
+		}
+	}
 	bumpFirstByte := func() {
 		if !firstAt.IsZero() {
 			return
@@ -493,10 +665,15 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 
 	// 3) start 有可能直接就是终态（回答很短，或者立刻失败了）。
 	if st := startResp.Initial; st != nil {
+		result.ResponseID = st.ResponseID
+		result.Reasoning = st.Reasoning
 		if st.Fail {
+			finished = true
 			r.app.ConversationOps.Inc("start", "failed")
 			err := upstreamError(st)
-			r.journal.MarkTerminal(requestID, "failed", "", err)
+			if !req.Isolated {
+				r.journal.MarkTerminal(requestID, "failed", "", err)
+			}
 			return result, err
 		}
 		if st.Text != "" {
@@ -520,23 +697,30 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			result.OutputItems = st.OutputItems
 		}
 		if st.Done {
-			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			finished = true
+			if !req.Isolated {
+				r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			}
 			// usage 兜底：上游轮询响应从不回 usage（顶层与 payload 均无
 			// 此键，抓包实证）。prompt 按本轮实际发送的 input 估算 ——
 			// 全量折叠模式下它就是"上下文窗口占用"的本体。
 			in := estimateInputTokens(req.Input)
 			out := estimateTokens(result.Text)
 			if result.Usage == nil {
+				result.UsageEstimated = true
 				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
 			}
 			if result.ProjectID != "" && result.ConversationID != "" {
 				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
 			}
+			result.GatewayState = captureGatewayState(req, result, sb)
 			return result, nil
 		}
 		if len(st.TurnState) > 0 {
 			turnState = st.TurnState
-			r.journal.UpdateState(requestID, turnState, "pending")
+			if !req.Isolated {
+				r.journal.UpdateState(requestID, turnState, "pending")
+			}
 		}
 	}
 
@@ -546,6 +730,7 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			r.client.Schema().RespIDKeys)
 	}
 
+	result.RunStage = "poll"
 	// 4) 轮询直到终态。
 	f := &r.cfg.Facade
 	limit := f.MaxPollTimeout
@@ -559,12 +744,10 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 	for {
 		if cerr := ctx.Err(); cerr != nil {
 			// 客户端断了：通知上游停止，别让这次生成白跑完还吃掉额度。
-			r.stopUpstream(p, requestID, convID, turnState)
 			return result, cerr
 		}
 		if time.Now().After(deadline) {
 			r.app.PollRounds.Inc("timeout")
-			r.stopUpstream(p, requestID, convID, turnState)
 			return result, fmt.Errorf("%w（已轮询 %d 次，已收 %d 字节）",
 				ErrPollTimeout, result.Polls, len(result.Text))
 		}
@@ -624,7 +807,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		// 忘了更新就会一直拿到同一个 pending，表现为"永远不结束"。
 		if len(st.TurnState) > 0 {
 			turnState = st.TurnState
-			r.journal.UpdateState(requestID, turnState, "pending")
+			if !req.Isolated {
+				r.journal.UpdateState(requestID, turnState, "pending")
+			}
 		}
 		if st.Usage != nil {
 			result.Usage = st.Usage
@@ -642,10 +827,9 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			result.ListenSnapshot = st.ListenSnapshot
 		}
 
-		if st.Delta != "" {
+		if st.Delta != "" || st.ReasoningDelta != "" {
 			if emit != nil {
 				if eerr := emit(Delta{Text: st.Delta, Reasoning: st.ReasoningDelta, Reset: st.Reset}); eerr != nil {
-					r.stopUpstream(p, requestID, convID, turnState)
 					return result, eerr
 				}
 				bumpFirstByte()
@@ -679,12 +863,12 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 		// （长轮询语义），直接进下一轮；否则补足差值。
 		if elapsed < interval {
 			if serr := sleepCtx(ctx, interval-elapsed); serr != nil {
-				r.stopUpstream(p, requestID, convID, turnState)
 				return result, serr
 			}
 		}
 
 		if st.Done {
+			finished = true
 			if result.Text == "" {
 				result.Text = prev
 			}
@@ -693,19 +877,25 @@ func (r *Runner) runOnce(ctx context.Context, acct *account.Account, req *RunReq
 			// 表达失败，漏判就会返回一个"成功的空回答"。
 			if st.Fail {
 				err := upstreamError(st)
-				r.journal.MarkTerminal(requestID, "failed", "", err)
+				if !req.Isolated {
+					r.journal.MarkTerminal(requestID, "failed", "", err)
+				}
 				return result, err
 			}
-			r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			if !req.Isolated {
+				r.journal.MarkTerminal(requestID, "completed", result.Text, nil)
+			}
 			// usage 兜底（与上方 start 直达完成路径同款）：上游不回 usage。
 			in := estimateInputTokens(req.Input)
 			out := estimateTokens(result.Text)
 			if result.Usage == nil {
+				result.UsageEstimated = true
 				result.Usage = &prism.Usage{InputTokens: in, OutputTokens: out, TotalTokens: in + out}
 			}
 			if result.ProjectID != "" && result.ConversationID != "" {
 				r.projects.Put(acct.ID, "cid:"+result.ConversationID, result.ProjectID, time.Now())
 			}
+			result.GatewayState = captureGatewayState(req, result, sb)
 			return result, nil
 		}
 	}
@@ -763,7 +953,7 @@ func (r *Runner) ensureSandbox(ctx context.Context, acct *account.Account, proje
 		return sb, nil
 	}
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
 	var lastErr error
@@ -837,7 +1027,7 @@ func (r *Runner) syncSandboxWorkspace(ctx context.Context, acct *account.Account
 		return true
 	}
 
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 	started := time.Now()
 
@@ -1012,7 +1202,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 	}
 
 	bucketKey := req.StickyKey
-	if !f.ReuseProject {
+	if req.Isolated || !f.ReuseProject {
 		return r.createProject(ctx, acct)
 	}
 
@@ -1053,7 +1243,7 @@ func (r *Runner) resolveProject(ctx context.Context, acct *account.Account, req 
 }
 
 func (r *Runner) createProject(ctx context.Context, acct *account.Account) (string, error) {
-	cred := acct.Credential()
+	cred := runnerCredential(ctx, acct)
 	p := prism.Principal{Client: acct.Client, Cred: cred, ExtraHeaders: cred.Headers, AccountID: acct.ID}
 
 	var lastErr error

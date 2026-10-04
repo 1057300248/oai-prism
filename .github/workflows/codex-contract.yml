@@ -1,0 +1,52 @@
+name: Real Codex Contract
+on:
+  push:
+    branches: [master, codex/newapi-native-hardening-20261003]
+  pull_request:
+    paths: ['internal/**', 'tools/codex*', 'tools/codex-fixture/**', 'tools/model-catalog/**', 'go.*', '.github/workflows/codex-contract.yml']
+permissions:
+  contents: read
+concurrency:
+  group: real-codex-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  client-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Metadata parser tests
+        run: node --test tools/model-catalog/normalize.test.mjs
+      - name: Install fixed public client
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/codex-tools"
+          npm install --prefix "$RUNNER_TEMP/codex-tools" --save-exact @openai/codex@0.160.0
+          go build -o "$RUNNER_TEMP/codex-fixture" ./tools/codex-fixture
+      - name: Files, tests, review and sandbox boundaries
+        run: |
+          set -euo pipefail
+          export CODEX_CLI="$RUNNER_TEMP/codex-tools/node_modules/.bin/codex"
+          export CODEX_FIXTURE_BIN="$RUNNER_TEMP/codex-fixture"
+          export CODEX_EVIDENCE_DIR="$GITHUB_WORKSPACE/codex-evidence"
+          bash tools/codex_ci_sandbox.sh python tools/codex_contract_test.py
+      - name: Identify tested source
+        if: always()
+        run: |
+          mkdir -p codex-evidence
+          git rev-parse HEAD > codex-evidence/source-commit.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: real-codex-contract-${{ github.sha }}
+          path: codex-evidence/
+          retention-days: 7

@@ -1,0 +1,169 @@
+# Copy to a private config file. This is the GATEWAY profile, not the browser
+# workbench profile. It never exposes /admin, /dashboard or /prism routes.
+# Set OAI_PRISM_API_KEYS to a random downstream channel key before starting.
+# Supply your own authorized upstream credentials in the separately mounted file.
+# See CONTEXT_CACHE.md, CODEX_GATEWAY.md, FILES_MEDIA.md and BRIDGE_TRANSPORT.md.
+server:
+  host: 127.0.0.1
+  port: 8787
+  read_header_timeout: 10s
+  read_timeout: 30s
+  write_timeout: 0s
+  idle_timeout: 120s
+  max_header_bytes: 65536
+  max_body_bytes: 12582912
+  cors_origin: ""
+
+upstream:
+  # Existing transport service must be running and reachable from this process.
+  # This profile does not provision a browser or bypass upstream access controls.
+  base_url: http://127.0.0.1:8790
+  timeout: 0s
+  dial_timeout: 10s
+  tls_handshake_timeout: 10s
+  response_header_timeout: 120s
+  insecure_skip_verify: false
+  max_retries: 0
+  force_http2: false
+
+creds:
+  mode: file
+  file: /var/lib/oaiprism/accounts.json
+  reload_interval: 5s
+  auto_refresh: true
+  persist_refresh: false
+  accounts: []
+
+pool:
+  strategy: least_inflight
+  health_check: true
+  max_wait: 5s
+  cooldown: 60s
+
+facade:
+  enabled: true
+  api_keys: [] # Set OAI_PRISM_API_KEYS; empty keys prevent gateway startup.
+  default_model: prism-text
+  models:
+    prism-text:
+      model: REPLACE_WITH_VERIFIED_PRISM_MODEL
+      reasoning_effort: medium
+  default_system_prompt: ""
+  use_sandbox: true
+  reuse_project: false
+  max_poll_timeout: 6m
+  sync_timeout: 6m
+  poll_interval: 1s
+  poll_backoff_max: 5s
+  rate_per_second: 2
+  rate_burst: 4
+  gateway:
+    enabled: true
+    timeout: 6m
+    max_concurrent: 8
+    usage_policy: estimate
+    # Explicit compatibility emulation, not upstream-native constrained decoding.
+    prompt_tools: true
+    structured_output: true
+    local_output_limit: true
+    # Tested Codex 0.160.0 function/custom/namespace contract; opt in explicitly.
+    # Files, shell, MCP and subprocesses still execute on the client, not here.
+    codex_tools: false
+    bridge:
+      # This is gateway-to-Prism transport, not the public Files API body format.
+      upload_mode: multipart # Optional raw binary; verify actual upstream first.
+      # 0 preserves the existing limit behavior; configure measured JSON bytes.
+      # Does not disable the public request limit or permit silent multi-turn ACKs.
+      max_start_bytes: 0
+      instruction_placement: system # Optional user_relay COPY; never drops system.
+      additional_tools: false # Requires prompt_tools and codex_tools.
+      continuation:
+        # Opt-in only: requires use_sandbox, response_store and trusted tenant.
+        # One process must exclusively own these upstream accounts.
+        enabled: false
+        verified_models: []
+        ttl: 10m
+        session_header: "" # Optional per-client task label, never identity.
+        action_id: "" # Optional observed Next action ID; empty uses bounded discovery.
+    catalog:
+      refresh_interval: 5m
+      max_age: 1h
+      publish: [] # Discovery never changes NewAPI pricing or permissions.
+      sources: [] # One operator-owned source per existing account-pool ID.
+      # sources:
+      #   - name: account-a-models
+      #     account_id: YOUR_EXISTING_ACCOUNT_POOL_ID
+      #     path: /var/lib/oaiprism/catalog/account-a.json
+      # publish: [YOUR_OBSERVED_PUBLIC_MODEL_ID]
+
+    # Binary media requires authoritative upstream usage even with policy=estimate.
+    # Enable only after testing the actual upstream model/transport.
+    inline_images: false
+    media:
+      # Zero means UNKNOWN. Positive reserves are operator-tested admission bounds,
+      # not tokenizer measurements or billing. Context checks fail without them.
+      image_reserve_tokens: 0
+      pdf_reserve_tokens: 0
+      pdf_models: [] # Public aliases whose upstream PDF file transport was verified.
+      max_images: 8
+      max_pdfs: 2
+    files:
+      # Shared channel keys alone cannot authorize per-user file storage.
+      # Requires trusted tenant_header + trusted_peers before enabling.
+      enabled: false
+      path: "" # Empty: memory only. For persistence use a SEPARATE SQLite path.
+      key_env: "" # Persistent files require base64 of 32 random bytes in this env.
+      ttl: 24h
+      owner_files: 64
+      owner_bytes: 33554432 # 32 MiB; each file is limited to 8 MiB.
+      total_bytes: 134217728 # 128 MiB; quotas reject rather than evict other owners.
+
+    # Safe default for NewAPI channels shared by multiple end users.
+    response_store: false
+    tenant_header: ""
+    trusted_peers: []
+    store_path: ""
+    store_key_env: ""
+    context:
+      # Configure verified window_tokens or model_windows before enabling.
+      enabled: false
+      window_tokens: 0
+      model_windows: {}
+      output_reserve: 4096
+      safety_margin: 1024
+      auto_compact: false
+      trigger_tokens: 0 # 0 means 80% of the effective input budget.
+      keep_last_turns: 4
+      summary_tokens: 1024
+      max_summary_calls: 8
+      # Retention feature independent of Responses store:false.
+      # Requires trusted tenant_header + trusted_peers.
+      summary_cache: false
+      cache_ttl: 30m
+    prompt_cache:
+      # Account affinity only; never shares mutable workspaces or cached answers.
+      affinity: true
+      native_models: [] # Only aliases with verified upstream cache controls.
+
+# To enable files, response storage, summary caching or upstream continuation,
+# the authenticated proxy MUST overwrite tenant_header with a verified END-USER
+# identity. Do not forward a client-supplied value or share one static tenant.
+# Example identity/response overrides only after establishing that contract:
+#   tenant_header: X-Verified-Tenant
+#   trusted_peers: ["127.0.0.1/32"]
+#   response_store: true
+#   store_path: /var/lib/oaiprism/responses.sqlite
+#   store_key_env: OAI_PRISM_RESPONSE_STORE_KEY
+# File persistence instead uses files.path and files.key_env; do not reuse the DB.
+# No official model cost/window is inferred from example values in this profile.
+
+capture:
+  enabled: false
+metrics:
+  enabled: true
+  health: /healthz
+  ready: /readyz
+  path: /metrics
+log:
+  level: info
+  format: json
